@@ -7,5 +7,5 @@ export default async function LoginPage({
   searchParams: Promise<{ error?: string }>
 }) {
   const { error } = await searchParams
-  return <AuthForm configurationError={getSupabaseConfigError()} callbackError={error === 'callback'} />
+  return <AuthForm configurationError={getSupabaseConfigError()} callbackError={error === 'callback'} inactiveError={error === 'inactive'} />
 }

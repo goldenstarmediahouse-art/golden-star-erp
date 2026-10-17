@@ -30,10 +30,14 @@ import {
   ecoCashPeriodError,
   nullableDate,
 } from '@/lib/reports/ecocash-period.mjs'
+import {
+  photographyWeeklyFieldOrder,
+  photographyWeeklyFields,
+} from '@/lib/reports/photography-weekly.mjs'
 
 export type WorkspaceRole = 'worker' | 'boss' | 'admin'
 type Tab = 'overview' | 'reports' | 'submit' | 'finance' | 'staff' | 'admin' | 'print'
-type ReportStatus = 'draft' | 'submitted' | 'under_review' | 'approved' | 'revision_requested' | 'rejected'
+type ReportStatus = 'draft' | 'submitted' | 'under_review' | 'approved' | 'revision_requested' | 'rejected' | 'archived'
 type FieldType = 'text' | 'textarea' | 'number' | 'currency' | 'date' | 'select' | 'checkbox'
 
 type Account = {
@@ -244,6 +248,7 @@ const statusLabels: Record<ReportStatus, string> = {
   approved: 'Approved',
   revision_requested: 'Revision requested',
   rejected: 'Rejected',
+  archived: 'Archived',
 }
 
 const statusStyles: Record<ReportStatus, string> = {
@@ -253,10 +258,12 @@ const statusStyles: Record<ReportStatus, string> = {
   approved: 'status-green',
   revision_requested: 'status-amber',
   rejected: 'status-red',
+  archived: 'status-neutral',
 }
 
 const ecoCashOrganizationId = '825dcc70-7f64-4da5-806f-3e43fcb9f0db'
 const ecoCashDepartmentId = '1d871f18-18d3-452b-8974-6b9182410880'
+const photographyWeeklyTemplateId = '04146788-3a4e-497e-b019-ce1737dd03fb'
 const ecoCashDays = [
   { id: 'monday', label: 'Monday', short: 'mon' },
   { id: 'tuesday', label: 'Tuesday', short: 'tue' },
@@ -340,6 +347,10 @@ function isEcoCashTemplate(template: Template | undefined, account: Account) {
     && template.department_id === ecoCashDepartmentId
     && template.id === ECOCASH_TEMPLATE_ID,
   )
+}
+
+function isPhotographyWeeklyTemplate(template: Template | undefined) {
+  return template?.id === photographyWeeklyTemplateId
 }
 
 function isMediaReport(template: Template | undefined, department: Department | undefined) {
@@ -462,11 +473,23 @@ export default function ErpWorkspace({ account }: { account: Account }) {
     setLoading(true)
     setError('')
     try {
-      const reportsRequest = supabase
-        .from('reports')
-        .select('id, organization_id, template_id, department_id, submitted_by, report_period_start, report_period_end, status, submitted_at, reviewed_at, created_at, updated_at')
-        .order('created_at', { ascending: false })
-        .limit(200)
+      const reportsRequest = isAdmin
+        ? fetchAllPages(
+          (from, to) => supabase
+            .from('reports')
+            .select('id, organization_id, template_id, department_id, submitted_by, report_period_start, report_period_end, status, submitted_at, reviewed_at, created_at, updated_at')
+            .eq('organization_id', account.organizationId)
+            .order('created_at', { ascending: false })
+            .order('id', { ascending: true })
+            .range(from, to),
+          'Could not load all organization reports',
+        ).then((rows) => ({ data: rows, error: null }))
+        : supabase
+          .from('reports')
+          .select('id, organization_id, template_id, department_id, submitted_by, report_period_start, report_period_end, status, submitted_at, reviewed_at, created_at, updated_at')
+          .neq('status', 'archived')
+          .order('created_at', { ascending: false })
+          .limit(200)
       const departmentsRequest = supabase
         .from('departments')
         .select('id, name, code, manager_user_id, is_active')
@@ -478,11 +501,22 @@ export default function ErpWorkspace({ account }: { account: Account }) {
         .eq('organization_id', account.organizationId)
         .order('name')
         .limit(200)
-      const profilesRequest = supabase
-        .from('profiles')
-        .select('id, email, first_name, last_name, phone, job_title, department_id, status')
-        .order('first_name')
-        .limit(500)
+      const profilesRequest = isAdmin
+        ? fetchAllPages(
+          (from, to) => supabase
+            .from('profiles')
+            .select('id, email, first_name, last_name, phone, job_title, department_id, status')
+            .eq('organization_id', account.organizationId)
+            .order('first_name')
+            .order('id', { ascending: true })
+            .range(from, to),
+          'Could not load all organization employee profiles',
+        ).then((rows) => ({ data: rows, error: null }))
+        : supabase
+          .from('profiles')
+          .select('id, email, first_name, last_name, phone, job_title, department_id, status')
+          .order('first_name')
+          .limit(500)
       const assignmentsRequest = supabase
         .from('employee_assignments')
         .select('id, user_id, previous_department_id, new_department_id, changed_by, reason, created_at')
@@ -604,6 +638,7 @@ export default function ErpWorkspace({ account }: { account: Account }) {
           .from('reports')
           .select('id, organization_id, template_id, department_id, submitted_by, report_period_start, report_period_end, status, submitted_at, reviewed_at, created_at, updated_at')
           .eq('organization_id', account.organizationId)
+          .neq('status', 'archived')
           .order('created_at', { ascending: false })
           .order('id', { ascending: true })
           .range(from, to),
@@ -700,10 +735,14 @@ export default function ErpWorkspace({ account }: { account: Account }) {
 
   const selectedReport = data.reports.find((report) => report.id === selectedReportId)
   const selectedTemplate = data.templates.find((template) => template.id === templateId)
-  const selectedFields = data.fields.filter((field) => field.template_id === templateId)
+  const selectedTemplateFields = data.fields.filter((field) => field.template_id === templateId)
+  const selectedFields = isPhotographyWeeklyTemplate(selectedTemplate)
+    ? photographyWeeklyFields(selectedTemplateFields)
+    : selectedTemplateFields
   const selectedDepartment = data.departments.find((department) => department.id === account.departmentId)
   const availableTemplates = data.templates.filter((template) => template.is_active && template.organization_id === account.organizationId && template.department_id === account.departmentId)
-  const visibleReports = data.reports.filter((report) => {
+  const activeReports = data.reports.filter((report) => report.status !== 'archived')
+  const visibleReports = activeReports.filter((report) => {
     const templateName = data.templates.find((template) => template.id === report.template_id)?.name ?? ''
     const employee = data.profiles.find((profile) => profile.id === report.submitted_by)
     const employeeName = employee ? `${employee.first_name} ${employee.last_name}` : ''
@@ -711,7 +750,7 @@ export default function ErpWorkspace({ account }: { account: Account }) {
   })
   const incomeCount = data.transactions.filter((transaction) => transaction.type === 'income').length
   const expenseCount = data.transactions.filter((transaction) => transaction.type === 'expense').length
-  const pendingReports = data.reports.filter((report) => report.status === 'submitted' || report.status === 'under_review').length
+  const pendingReports = activeReports.filter((report) => report.status === 'submitted' || report.status === 'under_review').length
   const unreadNotifications = data.notifications.filter((notification) => !notification.is_read).length
   const printDateRangeValid = !printDateStart || !printDateEnd || printDateStart <= printDateEnd
   const printReports = printData?.reports.filter((report) => {
@@ -763,6 +802,10 @@ export default function ErpWorkspace({ account }: { account: Account }) {
   }
 
   function openDraft(report: Report) {
+    if (report.status === 'archived') {
+      setError('Archived reports cannot be edited or resubmitted.')
+      return
+    }
     const answers = data.answers.filter((answer) => answer.report_id === report.id)
     const values: Record<string, string> = {}
     for (const answer of answers) {
@@ -777,6 +820,14 @@ export default function ErpWorkspace({ account }: { account: Account }) {
           ? answer.value_json
           : JSON.stringify(answer.value_json)
       } else values[field.id] = ''
+    }
+    const reportTemplate = data.templates.find((template) => template.id === report.template_id)
+    if (isPhotographyWeeklyTemplate(reportTemplate)) {
+      const reportFields = photographyWeeklyFields(data.fields.filter((field) => field.template_id === report.template_id))
+      for (const field of reportFields) {
+        if (field.field_key === 'week_start' && !values[field.id]) values[field.id] = report.report_period_start ?? ''
+        if (field.field_key === 'week_end' && !values[field.id]) values[field.id] = report.report_period_end ?? ''
+      }
     }
     setEditingReportId(report.id)
     setTemplateId(report.template_id)
@@ -803,11 +854,28 @@ export default function ErpWorkspace({ account }: { account: Account }) {
       return
     }
     const ecoCashReport = isEcoCashTemplate(selectedTemplate, account)
+    const photographyWeeklyReport = isPhotographyWeeklyTemplate(selectedTemplate)
+    if (photographyWeeklyReport && selectedFields.length !== photographyWeeklyFieldOrder.length) {
+      setError('The Photography Weekly Report template is missing one or more expected fields or has duplicate field definitions. Ask an administrator to verify the active Supabase template.')
+      return
+    }
+    const photographyWeekStartField = photographyWeeklyReport
+      ? selectedFields.find((field) => field.field_key === 'week_start')
+      : undefined
+    const photographyWeekEndField = photographyWeeklyReport
+      ? selectedFields.find((field) => field.field_key === 'week_end')
+      : undefined
+    const reportPeriodStart = photographyWeekStartField ? fieldValues[photographyWeekStartField.id] ?? '' : periodStart
+    const reportPeriodEnd = photographyWeekEndField ? fieldValues[photographyWeekEndField.id] ?? '' : periodEnd
     const editingReportStatus = data.reports.find((report) => report.id === editingReportId)?.status
+    if (editingReportStatus === 'archived') {
+      setError('Archived reports cannot be edited or resubmitted.')
+      return
+    }
     const incompleteEcoCashDraft = ecoCashReport
       && !submit
       && (!editingReportId || editingReportStatus === 'draft')
-    const hasValidPeriod = dateIsValid(periodStart) && dateIsValid(periodEnd) && periodEnd >= periodStart
+    const hasValidPeriod = dateIsValid(reportPeriodStart) && dateIsValid(reportPeriodEnd) && reportPeriodEnd >= reportPeriodStart
     if (!incompleteEcoCashDraft && !hasValidPeriod) {
       setError('Enter a valid reporting period. The end date must not be before the start date.')
       return
@@ -912,21 +980,21 @@ export default function ErpWorkspace({ account }: { account: Account }) {
         const { error: updateError } = await supabase
           .from('reports')
           .update({
-            report_period_start: nullableDate(periodStart),
-            report_period_end: nullableDate(periodEnd),
+            report_period_start: nullableDate(reportPeriodStart),
+            report_period_end: nullableDate(reportPeriodEnd),
           })
           .eq('id', savedReportId)
         if (updateError) throw updateError
       } else {
-        if (ecoCashReport && periodStart && periodEnd) {
+        if (ecoCashReport && reportPeriodStart && reportPeriodEnd) {
           const { data: duplicate, error: duplicateError } = await supabase
             .from('reports')
             .select('id, status')
             .eq('organization_id', account.organizationId)
             .eq('template_id', selectedTemplate.id)
             .eq('submitted_by', account.id)
-            .eq('report_period_start', periodStart)
-            .eq('report_period_end', periodEnd)
+            .eq('report_period_start', reportPeriodStart)
+            .eq('report_period_end', reportPeriodEnd)
             .maybeSingle()
           if (duplicateError) throw duplicateError
           if (duplicate) {
@@ -940,8 +1008,8 @@ export default function ErpWorkspace({ account }: { account: Account }) {
             template_id: selectedTemplate.id,
             department_id: account.departmentId,
             submitted_by: account.id,
-            report_period_start: nullableDate(periodStart),
-            report_period_end: nullableDate(periodEnd),
+            report_period_start: nullableDate(reportPeriodStart),
+            report_period_end: nullableDate(reportPeriodEnd),
             status: 'draft',
           })
           .select('id')
@@ -1019,6 +1087,10 @@ export default function ErpWorkspace({ account }: { account: Account }) {
   }
 
   async function reviewReport(report: Report, newStatus: 'under_review' | 'approved' | 'revision_requested' | 'rejected') {
+    if (report.status === 'archived') {
+      setError('Archived reports cannot be reviewed or modified.')
+      return
+    }
     setBusy(true)
     setError('')
     setNotice('')
@@ -1034,6 +1106,51 @@ export default function ErpWorkspace({ account }: { account: Account }) {
       await loadData()
     } catch (cause) {
       setError(messageOf(cause, 'Could not review this report.'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function archiveReport(report: Report) {
+    if (account.role !== 'admin' || report.status === 'archived') return
+    if (!window.confirm(`Archive the report from ${employeeName(data.profiles, report.submitted_by)}? Its answers, reviews, and audit history will be retained.`)) return
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      const { error: archiveError } = await supabase.rpc('admin_archive_report', { p_report_id: report.id })
+      if (archiveError) throw archiveError
+      setSelectedReportId('')
+      setNotice('Report archived. Its answers and review history have been retained.')
+      await loadData()
+    } catch (cause) {
+      setError(messageOf(cause, 'Could not archive the report.'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function setUserStatus(profile: Profile, newStatus: 'active' | 'inactive') {
+    if (account.role !== 'admin') return
+    if (profile.id === account.id) {
+      setError('You cannot deactivate your own administrator account.')
+      return
+    }
+    const action = newStatus === 'inactive' ? 'Deactivate' : 'Reactivate'
+    if (!window.confirm(`${action} ${profile.first_name} ${profile.last_name} (${profile.email})?`)) return
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      const { error: statusError } = await supabase.rpc('admin_set_user_status', {
+        p_user_id: profile.id,
+        p_new_status: newStatus,
+      })
+      if (statusError) throw statusError
+      setNotice(`Employee account ${newStatus === 'inactive' ? 'deactivated' : 'reactivated'}.`)
+      await loadData()
+    } catch (cause) {
+      setError(messageOf(cause, `Could not ${action.toLowerCase()} this employee account.`))
     } finally {
       setBusy(false)
     }
@@ -1146,7 +1263,7 @@ export default function ErpWorkspace({ account }: { account: Account }) {
     { id: 'print', label: 'Reports & Printing', icon: Printer, roles: ['boss', 'admin'] },
     { id: 'finance', label: 'Finance', icon: WalletCards, roles: ['boss', 'admin'] },
     { id: 'staff', label: 'Employees', icon: Users, roles: ['boss', 'admin'] },
-    { id: 'admin', label: 'Departments & audit', icon: ShieldCheck, roles: ['admin'] },
+    { id: 'admin', label: 'Admin', icon: ShieldCheck, roles: ['admin'] },
   ]
 
   return (
@@ -1218,7 +1335,7 @@ export default function ErpWorkspace({ account }: { account: Account }) {
               {tab === 'submit' && <SubmitPanel account={account} departments={data.departments} templates={availableTemplates} allTemplates={data.templates} fields={data.fields} templateId={templateId} setTemplateId={setTemplateId} periodStart={periodStart} setPeriodStart={setPeriodStart} periodEnd={periodEnd} setPeriodEnd={setPeriodEnd} values={fieldValues} setValues={setFieldValues} editingReportId={editingReportId} reportStatus={data.reports.find((report) => report.id === editingReportId)?.status ?? 'draft'} onSave={saveReport} onNew={clearDraftForm} busy={busy} />}
               {tab === 'finance' && <FinancePanel data={data} categoryName={categoryName} setCategoryName={setCategoryName} categoryType={categoryType} setCategoryType={setCategoryType} onAddCategory={addCategory} transactionCategory={transactionCategory} setTransactionCategory={setTransactionCategory} transactionDate={transactionDate} setTransactionDate={setTransactionDate} transactionDescription={transactionDescription} setTransactionDescription={setTransactionDescription} transactionAmount={transactionAmount} setTransactionAmount={setTransactionAmount} transactionType={transactionType} setTransactionType={setTransactionType} paymentStatus={paymentStatus} setPaymentStatus={setPaymentStatus} onAddTransaction={addTransaction} busy={busy} />}
               {tab === 'staff' && <StaffPanel account={account} data={data} />}
-              {tab === 'admin' && <AdminPanel data={data} departmentName={departmentName} setDepartmentName={setDepartmentName} departmentCode={departmentCode} setDepartmentCode={setDepartmentCode} onAddDepartment={addDepartment} onDepartmentActive={setDepartmentActive} busy={busy} />}
+              {tab === 'admin' && <AdminPanel account={account} data={data} departmentName={departmentName} setDepartmentName={setDepartmentName} departmentCode={departmentCode} setDepartmentCode={setDepartmentCode} onAddDepartment={addDepartment} onDepartmentActive={setDepartmentActive} onArchiveReport={archiveReport} onSetUserStatus={setUserStatus} busy={busy} />}
             </>
           )}
         </div>
@@ -1237,7 +1354,10 @@ function Overview({ account, data, pendingReports, unreadNotifications, incomeCo
   onTab: (tab: Tab) => void
   onReport: (id: string) => void
 }) {
-  const ownReports = account.role === 'worker' ? data.reports.filter((report) => report.submitted_by === account.id) : data.reports
+  const ownReports = data.reports.filter((report) =>
+    report.status !== 'archived'
+    && (account.role !== 'worker' || report.submitted_by === account.id),
+  )
   const metricCards = [
     { label: 'Reports loaded', value: String(ownReports.length), note: 'Among the latest 200 authorized records', icon: ClipboardList },
     { label: account.role === 'worker' ? 'Awaiting review' : 'Review queue', value: String(account.role === 'worker' ? ownReports.filter((report) => report.status === 'submitted' || report.status === 'under_review').length : pendingReports), note: 'Among the latest 200 authorized records', icon: FileText },
@@ -1552,6 +1672,9 @@ function SubmitPanel({ account, departments, templates, allTemplates, fields, te
   const hiddenRequiredFields = templateFields.filter((field) => field.is_required && shouldHideMediaField(template, department, field))
   const ecoCash = isEcoCashTemplate(template, account)
   const ecoCashMapping = ecoCash ? mapEcoCashFields(templateFields) : undefined
+  const photographyWeekly = isPhotographyWeeklyTemplate(template)
+  const photographyFields = photographyWeekly ? photographyWeeklyFields(templateFields) : []
+  const photographyFieldsReady = photographyFields.length === photographyWeeklyFieldOrder.length
   return (
     <div className="content-stack">
       <div className="schema-notice"><strong>{editingReportId ? 'Editing an existing draft' : 'Drafts are saved before submission'}</strong><p>New reports are inserted with status draft. Answers can be edited under RLS; submitting calls the database submit_report workflow, which validates ownership, department and required answers.</p></div>
@@ -1562,7 +1685,7 @@ function SubmitPanel({ account, departments, templates, allTemplates, fields, te
         onSave(true)
       }}>
         <div className="form-intro"><div className="metric-icon blue"><FileText /></div><div><h2>{editingReportId ? 'Update report draft' : 'Create a report draft'}</h2><p>{account.firstName} {account.lastName} · {account.role} · {template?.name ?? 'Choose a report template'}</p></div>{editingReportId && <button className="outline-button" type="button" onClick={onNew}>New draft</button>}</div>
-        <label className="workspace-template-field">Report template<select required value={templateId} onChange={(event) => { setTemplateId(event.target.value); setValues({}) }} disabled={Boolean(editingReportId)}><option value="">Choose an active template</option>{templates.map((item) => <option key={item.id} value={item.id}>{item.name} · v{item.version}</option>)}</select></label>
+        <label className="workspace-template-field">Report template<select required value={templateId} onChange={(event) => { setTemplateId(event.target.value); setValues({}); setPeriodStart(''); setPeriodEnd('') }} disabled={Boolean(editingReportId)}><option value="">Choose an active template</option>{templates.map((item) => <option key={item.id} value={item.id}>{item.name} · v{item.version}</option>)}</select></label>
         {ecoCash ? (
           <EcoCashReportForm
             account={account}
@@ -1576,6 +1699,21 @@ function SubmitPanel({ account, departments, templates, allTemplates, fields, te
             values={values}
             setValues={setValues}
           />
+        ) : photographyWeekly ? (
+          <div className="form-fields">
+            {photographyFields.map((field, index) => <ReportFieldInput
+              key={field.id}
+              field={field}
+              labelOverride={photographyWeeklyFieldOrder[index].label}
+              value={values[field.id] ?? ''}
+              onChange={(value) => {
+                setValues({ ...values, [field.id]: value })
+                if (field.field_key === 'week_start') setPeriodStart(value)
+                if (field.field_key === 'week_end') setPeriodEnd(value)
+              }}
+            />)}
+            {!photographyFieldsReady && <div className="workspace-alert error" role="alert"><strong>Photography template fields need verification</strong><span>The active Supabase template must contain one week_start date, one week_end date, and each of the three requested fields. No stale or fallback fields are shown.</span></div>}
+          </div>
         ) : (
           <div className="form-fields">
             <label>Reporting period start<input type="date" required value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} /></label>
@@ -1584,7 +1722,7 @@ function SubmitPanel({ account, departments, templates, allTemplates, fields, te
             {!displayedFields.length && templateId && <p className="muted">This template has no visible fields.</p>}
           </div>
         )}
-        <div className="form-footer"><span>{selectedTemplatesNote(template, templates.length)}</span><div className="button-row"><button className="outline-button" type="button" onClick={() => onSave(false)} disabled={busy || !templateId}>Save draft</button><button className="primary-button" type="submit" disabled={busy || !templateId || Boolean(ecoCashMapping && !ecoCashMapping.canSubmit)}>Save and submit</button></div></div>
+        <div className="form-footer"><span>{selectedTemplatesNote(template, templates.length)}</span><div className="button-row"><button className="outline-button" type="button" onClick={() => onSave(false)} disabled={busy || !templateId || (photographyWeekly && !photographyFieldsReady)}>Save draft</button><button className="primary-button" type="submit" disabled={busy || !templateId || Boolean(ecoCashMapping && !ecoCashMapping.canSubmit) || (photographyWeekly && !photographyFieldsReady)}>Save and submit</button></div></div>
       </form>
     </div>
   )
@@ -1713,8 +1851,8 @@ function selectedTemplatesNote(template: Template | undefined, count: number) {
   return template ? `Template version ${template.version}` : `${count} active template${count === 1 ? '' : 's'} available`
 }
 
-function ReportFieldInput({ field, value, onChange }: { field: ReportField; value: string; onChange: (value: string) => void }) {
-  const label = <>{field.label}{field.is_required && <span className="required"> *</span>}</>
+function ReportFieldInput({ field, value, onChange, labelOverride }: { field: ReportField; value: string; onChange: (value: string) => void; labelOverride?: string }) {
+  const label = <>{labelOverride ?? field.label}{field.is_required && <span className="required"> *</span>}</>
   if (field.field_type === 'textarea') return <label className="workspace-full-field">{label}<textarea required={field.is_required} value={value} onChange={(event) => onChange(event.target.value)} rows={4} /></label>
   if (field.field_type === 'checkbox') return <label className="checkbox-field"><input type="checkbox" checked={value === 'true'} onChange={(event) => onChange(String(event.target.checked))} />{label}</label>
   if (field.field_type === 'select') {
@@ -1805,7 +1943,8 @@ function employeeName(profiles: Profile[], userId: string) {
   return profile ? `${profile.first_name} ${profile.last_name}` : 'Authorized user'
 }
 
-function AdminPanel({ data, departmentName, setDepartmentName, departmentCode, setDepartmentCode, onAddDepartment, onDepartmentActive, busy }: {
+function AdminPanel({ account, data, departmentName, setDepartmentName, departmentCode, setDepartmentCode, onAddDepartment, onDepartmentActive, onArchiveReport, onSetUserStatus, busy }: {
+  account: Account
   data: WorkspaceData
   departmentName: string
   setDepartmentName: (value: string) => void
@@ -1813,12 +1952,92 @@ function AdminPanel({ data, departmentName, setDepartmentName, departmentCode, s
   setDepartmentCode: (value: string) => void
   onAddDepartment: (event: FormEvent<HTMLFormElement>) => void
   onDepartmentActive: (department: Department) => void
+  onArchiveReport: (report: Report) => void
+  onSetUserStatus: (profile: Profile, status: 'active' | 'inactive') => void
   busy: boolean
 }) {
+  const [section, setSection] = useState<'reports' | 'users' | 'departments'>('reports')
+  const [reportSearch, setReportSearch] = useState('')
+  const [reportView, setReportView] = useState<'active' | 'archived'>('active')
+  const [userSearch, setUserSearch] = useState('')
+  const [userDepartment, setUserDepartment] = useState('')
+  const [userStatus, setUserStatusFilter] = useState('')
+  const reports = data.reports.filter((report) => {
+    const archived = report.status === 'archived'
+    if (archived !== (reportView === 'archived')) return false
+    const templateName = data.templates.find((template) => template.id === report.template_id)?.name ?? ''
+    const departmentName = data.departments.find((department) => department.id === report.department_id)?.name ?? ''
+    const profile = data.profiles.find((employee) => employee.id === report.submitted_by)
+    const employeeName = profile ? `${profile.first_name} ${profile.last_name}` : ''
+    const searchText = `${employeeName} ${profile?.email ?? ''} ${departmentName} ${templateName} ${report.status} ${report.report_period_start ?? ''} ${report.report_period_end ?? ''}`.toLowerCase()
+    return searchText.includes(reportSearch.trim().toLowerCase())
+  })
+  const users = data.profiles.filter((profile) => {
+    const name = `${profile.first_name} ${profile.last_name}`.toLowerCase()
+    const role = (data.roleByUser[profile.id] ?? []).join(' ').toLowerCase()
+    return (!userDepartment || profile.department_id === userDepartment)
+      && (!userStatus || profile.status === userStatus)
+      && `${name} ${profile.email} ${role}`.toLowerCase().includes(userSearch.trim().toLowerCase())
+  })
+  const departmentLabel = (id: string | null) => data.departments.find((department) => department.id === id)?.name ?? 'Unassigned'
   return (
     <div className="content-stack">
-      <div className="schema-notice"><strong>Administration follows the exported RLS policies</strong><p>Department create and active-state updates are allowed for admins. Report templates, fields, user roles, profile edits and employee assignments are read-only here because the export does not provide a verified safe business workflow for changing them.</p></div>
-      <div className="two-col">
+      <div className="admin-section-tabs" role="tablist" aria-label="Admin management sections">
+        <button type="button" role="tab" aria-selected={section === 'reports'} className={section === 'reports' ? 'active' : ''} onClick={() => setSection('reports')}>Manage Reports</button>
+        <button type="button" role="tab" aria-selected={section === 'users'} className={section === 'users' ? 'active' : ''} onClick={() => setSection('users')}>Manage Users</button>
+        <button type="button" role="tab" aria-selected={section === 'departments'} className={section === 'departments' ? 'active' : ''} onClick={() => setSection('departments')}>Departments & Audit</button>
+      </div>
+      {section === 'reports' && <section className="panel table-panel">
+        <div className="table-meta"><div><h2>Manage reports</h2><p className="muted">Archive and review reports within your organization. Archived data is retained and removed from ordinary report lists.</p></div>
+          <div className="admin-filter-row">
+            <input aria-label="Search reports" placeholder="Search employee, department, template…" value={reportSearch} onChange={(event) => setReportSearch(event.target.value)} />
+            <select aria-label="Report archive view" value={reportView} onChange={(event) => setReportView(event.target.value as typeof reportView)}><option value="active">Active reports</option><option value="archived">Archived reports</option></select>
+          </div>
+        </div>
+        {reports.length ? <div className="table-wrap"><table><thead><tr><th>Employee</th><th>Department</th><th>Template</th><th>Reporting period</th><th>Status</th><th>Submitted</th><th>Action</th></tr></thead><tbody>
+          {reports.map((report) => {
+            const employee = data.profiles.find((profile) => profile.id === report.submitted_by)
+            return <tr key={report.id}>
+              <td>{employee ? `${employee.first_name} ${employee.last_name}`.trim() || employee.email : 'Employee'}</td>
+              <td>{departmentLabel(report.department_id)}</td>
+              <td>{data.templates.find((template) => template.id === report.template_id)?.name ?? 'Report'}</td>
+              <td>{formatDate(report.report_period_start)} – {formatDate(report.report_period_end)}</td>
+              <td><span className={`status-pill ${statusStyles[report.status]}`}>{statusLabels[report.status] ?? report.status}</span></td>
+              <td>{formatTimestamp(report.submitted_at)}</td>
+              <td>{report.status === 'archived'
+                ? <span className="muted">Archived</span>
+                : <button type="button" className="outline-button compact-button" disabled={busy} onClick={() => onArchiveReport(report)}>Archive</button>}</td>
+            </tr>
+          })}
+        </tbody></table></div> : <EmptyState>{reportView === 'archived' ? 'No archived reports match this search.' : 'No active reports match this search.'}</EmptyState>}
+        <p className="muted admin-result-count">{reports.length} {reportView} report{reports.length === 1 ? '' : 's'}</p>
+      </section>}
+      {section === 'users' && <section className="panel table-panel">
+        <div className="table-meta"><div><h2>Manage users</h2><p className="muted">Account status changes use the administrator RPC; profiles and historical records are retained.</p></div>
+          <div className="admin-filter-row">
+            <input aria-label="Search employees" placeholder="Search name, email or role…" value={userSearch} onChange={(event) => setUserSearch(event.target.value)} />
+            <select aria-label="Filter employees by department" value={userDepartment} onChange={(event) => setUserDepartment(event.target.value)}><option value="">All departments</option>{data.departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select>
+            <select aria-label="Filter employees by status" value={userStatus} onChange={(event) => setUserStatusFilter(event.target.value)}><option value="">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option></select>
+          </div>
+        </div>
+        {users.length ? <div className="table-wrap"><table><thead><tr><th>Employee</th><th>Email</th><th>Department</th><th>Role</th><th>Account status</th><th>Action</th></tr></thead><tbody>
+          {users.map((profile) => {
+            const inactive = profile.status !== 'active'
+            return <tr key={profile.id}>
+              <td>{`${profile.first_name} ${profile.last_name}`.trim() || 'Employee'}</td>
+              <td>{profile.email}</td>
+              <td>{departmentLabel(profile.department_id)}</td>
+              <td>{(data.roleByUser[profile.id] ?? []).join(', ') || '—'}</td>
+              <td><span className={`status-pill ${inactive ? 'status-neutral' : 'status-green'}`}>{profile.status}</span></td>
+              <td>{profile.id === account.id
+                ? <span className="muted">Current account</span>
+                : <button type="button" className={inactive ? 'primary-button compact-button' : 'outline-button compact-button'} disabled={busy} onClick={() => onSetUserStatus(profile, inactive ? 'active' : 'inactive')}>{inactive ? 'Reactivate' : 'Deactivate'}</button>}</td>
+            </tr>
+          })}
+        </tbody></table></div> : <EmptyState>No employees match these filters.</EmptyState>}
+        <p className="muted admin-result-count">{users.length} employee{users.length === 1 ? '' : 's'}</p>
+      </section>}
+      {section === 'departments' && <><div className="schema-notice"><strong>Administration follows organization RLS and administrator RPC permissions</strong><p>Account status and report archive changes are routed through the supplied database RPCs; this interface does not directly update protected report or profile columns.</p></div><div className="two-col">
         <section className="panel form-panel"><h2>Departments</h2>
           <div className="workspace-list">{data.departments.map((department) => <div className="workspace-list-row" key={department.id}><Building2 /><span>{department.name}<small>{department.code}</small></span><small>{department.is_active ? 'Active' : 'Inactive'}</small><button className="outline-button compact-button" type="button" disabled={busy} onClick={() => onDepartmentActive(department)}>{department.is_active ? 'Deactivate' : 'Activate'}</button></div>)}{!data.departments.length && <EmptyState>No departments are visible.</EmptyState>}</div>
           <form className="workspace-inline-form" onSubmit={onAddDepartment}><label>Name<input required maxLength={80} value={departmentName} onChange={(event) => setDepartmentName(event.target.value)} /></label><label>Code<input required maxLength={30} value={departmentCode} onChange={(event) => setDepartmentCode(event.target.value)} /></label><button className="primary-button" disabled={busy} type="submit"><Plus /> Add department</button></form>
@@ -1828,7 +2047,7 @@ function AdminPanel({ data, departmentName, setDepartmentName, departmentCode, s
             {data.audit.map((entry) => <tr key={entry.id}><td>{entry.action}</td><td>{entry.entity_type}</td><td>{entry.entity_id ?? '—'}</td><td>{entry.actor_user_id ? employeeName(data.profiles, entry.actor_user_id) : 'System'}</td><td>{formatTimestamp(entry.created_at)}</td></tr>)}
           </tbody></table></div> : <EmptyState>No audit entries are visible.</EmptyState>}
         </section>
-      </div>
+      </div></>}
     </div>
   )
 }

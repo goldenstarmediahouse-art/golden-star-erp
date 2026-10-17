@@ -55,7 +55,13 @@ export default async function Page() {
     return <AccessMessage title="ERP access is not provisioned" message="Your signed-in account does not have an employee profile in this organization. Ask an administrator to provision your profile." />
   }
   if (profile.status !== 'active') {
-    return <AccessMessage title="ERP access is inactive" message="Your employee profile is not active. Contact your organization administrator." />
+    const { error: signOutError } = await supabase.auth.signOut()
+    return <AccessMessage
+      title="ERP access is inactive"
+      message={signOutError
+        ? 'Your employee profile is not active. ERP access is denied, but this session could not be cleared automatically. Sign out of the browser session and contact your organization administrator.'
+        : 'Your employee profile is not active. Your session has been signed out. Contact your organization administrator.'}
+    />
   }
 
   const { data: memberships, error: membershipError } = await supabase

@@ -25,7 +25,7 @@ export async function proxy(request: NextRequest) {
     },
   })
 
-  const { error } = await supabase.auth.getUser()
+  const { data: { user }, error } = await supabase.auth.getUser()
   const expiredSession =
     error?.code === 'refresh_token_not_found' ||
     error?.code === 'invalid_refresh_token' ||
@@ -44,6 +44,25 @@ export async function proxy(request: NextRequest) {
 
   if (error && error.name !== 'AuthSessionMissingError') {
     throw new Error(`Supabase session refresh failed: ${error.message}`)
+  }
+
+  if (request.nextUrl.pathname === '/' && user) {
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('status')
+      .eq('id', user.id)
+      .maybeSingle()
+    if (profileError) {
+      throw new Error(`Could not verify the signed-in employee account status: ${profileError.message}`)
+    }
+    if (!profile || profile.status !== 'active') {
+      const loginUrl = new URL('/login?error=inactive', request.url)
+      const deniedResponse = NextResponse.redirect(loginUrl)
+      request.cookies.getAll()
+        .filter(({ name }) => name.startsWith('sb-') && name.includes('-auth-token'))
+        .forEach(({ name }) => deniedResponse.cookies.delete(name))
+      return deniedResponse
+    }
   }
 
   return response

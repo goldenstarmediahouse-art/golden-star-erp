@@ -10,16 +10,22 @@ import { createSupabaseBrowserClient } from '@/lib/supabase/browser'
 export default function AuthForm({
   configurationError,
   callbackError,
+  inactiveError,
 }: {
   configurationError: string | null
   callbackError: boolean
+  inactiveError: boolean
 }) {
   const router = useRouter()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [message, setMessage] = useState('')
   const [error, setError] = useState(
-    callbackError ? 'The sign-in or password recovery link could not be verified. Request a new link and try again.' : '',
+    callbackError
+      ? 'The sign-in or password recovery link could not be verified. Request a new link and try again.'
+      : inactiveError
+        ? 'Your employee account is inactive. ERP access has been denied; contact your administrator.'
+        : '',
   )
   const [busy, setBusy] = useState(false)
 
@@ -31,8 +37,22 @@ export default function AuthForm({
 
     try {
       const supabase = createSupabaseBrowserClient()
-      const { error: signInError } = await supabase.auth.signInWithPassword({ email, password })
+      const { data: signedIn, error: signInError } = await supabase.auth.signInWithPassword({ email, password })
       if (signInError) throw signInError
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('status')
+        .eq('id', signedIn.user.id)
+        .maybeSingle()
+      if (profileError) {
+        await supabase.auth.signOut()
+        throw new Error(`Could not verify your employee account status: ${profileError.message}`)
+      }
+      if (!profile || profile.status !== 'active') {
+        const { error: signOutError } = await supabase.auth.signOut()
+        if (signOutError) throw new Error('This employee account is inactive and access was denied. Please close this browser session and contact an administrator.')
+        throw new Error('This employee account is inactive or not provisioned. Contact an administrator.')
+      }
       router.replace('/')
       router.refresh()
     } catch (cause) {

@@ -141,3 +141,20 @@ button { cursor:pointer; }
   .status-pill { border:1px solid #aaa; background:#fff!important; color:#111!important; }
   .print-access-card,.print-filter-grid,.print-controls,.print-results-heading,.print-control-cell,.workspace-sidebar,.topbar,.page-heading,.workspace-alert,.mobile-scrim { display:none!important; }
 }
+
+.admin-section-tabs { display:flex; gap:8px; flex-wrap:wrap; border-bottom:1px solid #dfe5eb; }
+.admin-section-tabs button { border:0; border-bottom:2px solid transparent; background:transparent; color:#526171; padding:11px 14px; font-weight:600; font-size:12px; }
+.admin-section-tabs button:hover,.admin-section-tabs button.active { color:#17212b; border-bottom-color:#c69a45; }
+.admin-filter-row { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:8px; min-width:min(100%, 360px); }
+.admin-filter-row input,.admin-filter-row select { min-width:145px; border:1px solid #cfd8e0; background:#fff; border-radius:4px; padding:9px 10px; color:#263746; font-size:12px; }
+.admin-filter-row input { flex:1; }
+.admin-result-count { padding:0 20px 14px; }
+.status-neutral { color:#4b5563; background:#edf0f2; }
+.compact-button { padding:7px 10px; white-space:nowrap; }
+@media (max-width:760px) {
+  .admin-section-tabs { overflow-x:auto; flex-wrap:nowrap; }
+  .admin-section-tabs button { white-space:nowrap; }
+  .table-meta { flex-direction:column; gap:12px; }
+  .admin-filter-row { width:100%; justify-content:stretch; }
+  .admin-filter-row input,.admin-filter-row select { min-width:0; flex:1 1 100%; }
+}
