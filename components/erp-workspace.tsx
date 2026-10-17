@@ -23,6 +23,7 @@ import {
 } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import { createSupabaseBrowserClient } from '@/lib/supabase/browser'
+import PwaInstallButton from '@/components/pwa-install-button'
 import {
   dateForWeekDay,
   dateIsValid,
@@ -1292,7 +1293,7 @@ export default function ErpWorkspace({ account }: { account: Account }) {
         <header className="topbar">
           <button type="button" className="mobile-menu" aria-label="Open navigation" onClick={() => setMobileNav(true)}><ClipboardList /></button>
           <div className="breadcrumb"><span>Golden Star Media House</span><ArrowUpRight /><strong>{navigation.find((item) => item.id === tab)?.label}</strong></div>
-          <div className="user-menu"><div className="avatar">{account.firstName.slice(0, 1).toUpperCase()}</div><div className="user-copy"><strong>{accountName}</strong><span>{account.jobTitle ?? account.role}</span></div></div>
+          <div className="user-menu"><PwaInstallButton /><div className="avatar">{account.firstName.slice(0, 1).toUpperCase()}</div><div className="user-copy"><strong>{accountName}</strong><span>{account.jobTitle ?? account.role}</span></div></div>
         </header>
         <div className="page-body">
           <div className="page-heading">

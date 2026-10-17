@@ -6,6 +6,13 @@ export const metadata: Metadata = {
   title: 'Golden Star Media House ERP',
   description: 'Internal operations, reporting and finance workspace for Golden Star Media House.',
   generator: 'v0.app',
+  manifest: '/manifest.webmanifest',
+  applicationName: 'Golden Star Media House ERP',
+  appleWebApp: {
+    capable: true,
+    title: 'Golden Star ERP',
+    statusBarStyle: 'default',
+  },
   icons: {
     icon: [
       {
