@@ -23,6 +23,13 @@ import {
 } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import { createSupabaseBrowserClient } from '@/lib/supabase/browser'
+import {
+  dateForWeekDay,
+  dateIsValid,
+  ECOCASH_TEMPLATE_ID,
+  ecoCashPeriodError,
+  nullableDate,
+} from '@/lib/reports/ecocash-period.mjs'
 
 export type WorkspaceRole = 'worker' | 'boss' | 'admin'
 type Tab = 'overview' | 'reports' | 'submit' | 'finance' | 'staff' | 'admin' | 'print'
@@ -86,8 +93,8 @@ type Report = {
   template_id: string
   department_id: string
   submitted_by: string
-  report_period_start: string
-  report_period_end: string
+  report_period_start: string | null
+  report_period_end: string | null
   status: ReportStatus
   submitted_at: string | null
   reviewed_at: string | null
@@ -250,7 +257,6 @@ const statusStyles: Record<ReportStatus, string> = {
 
 const ecoCashOrganizationId = '825dcc70-7f64-4da5-806f-3e43fcb9f0db'
 const ecoCashDepartmentId = '1d871f18-18d3-452b-8974-6b9182410880'
-const ecoCashTemplateName = 'EcoCash Weekly Float Register'
 const ecoCashDays = [
   { id: 'monday', label: 'Monday', short: 'mon' },
   { id: 'tuesday', label: 'Tuesday', short: 'tue' },
@@ -332,7 +338,7 @@ function isEcoCashTemplate(template: Template | undefined, account: Account) {
     && account.departmentId === ecoCashDepartmentId
     && template.organization_id === ecoCashOrganizationId
     && template.department_id === ecoCashDepartmentId
-    && template.name === ecoCashTemplateName,
+    && template.id === ECOCASH_TEMPLATE_ID,
   )
 }
 
@@ -346,25 +352,6 @@ function isMediaReport(template: Template | undefined, department: Department | 
 
 function shouldHideMediaField(template: Template | undefined, department: Department | undefined, field: ReportField) {
   return isMediaReport(template, department) && hiddenMediaFieldLabels.has(field.label.trim().toLowerCase())
-}
-
-function dateIsValid(value: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
-  const parsed = new Date(`${value}T00:00:00Z`)
-  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
-}
-
-function dateForWeekDay(weekStart: string, offset: number) {
-  if (!dateIsValid(weekStart)) return ''
-  const date = new Date(`${weekStart}T00:00:00Z`)
-  date.setUTCDate(date.getUTCDate() + offset)
-  return date.toISOString().slice(0, 10)
-}
-
-function isMondayToSunday(start: string, end: string) {
-  if (!dateIsValid(start) || !dateIsValid(end)) return false
-  const startDate = new Date(`${start}T00:00:00Z`)
-  return startDate.getUTCDay() === 1 && dateForWeekDay(start, 6) === end
 }
 
 function mapEcoCashFields(fields: ReportField[]) {
@@ -729,8 +716,8 @@ export default function ErpWorkspace({ account }: { account: Account }) {
   const printDateRangeValid = !printDateStart || !printDateEnd || printDateStart <= printDateEnd
   const printReports = printData?.reports.filter((report) => {
     const statusMatch = !printStatus || report.status === printStatus
-    const dateMatch = (!printDateStart || report.report_period_end >= printDateStart)
-      && (!printDateEnd || report.report_period_start <= printDateEnd)
+    const dateMatch = (!printDateStart || (report.report_period_end !== null && report.report_period_end >= printDateStart))
+      && (!printDateEnd || (report.report_period_start !== null && report.report_period_start <= printDateEnd))
     return printDateRangeValid
       && (!printDepartment || report.department_id === printDepartment)
       && (!printTemplate || report.template_id === printTemplate)
@@ -793,8 +780,8 @@ export default function ErpWorkspace({ account }: { account: Account }) {
     }
     setEditingReportId(report.id)
     setTemplateId(report.template_id)
-    setPeriodStart(report.report_period_start)
-    setPeriodEnd(report.report_period_end)
+    setPeriodStart(report.report_period_start ?? '')
+    setPeriodEnd(report.report_period_end ?? '')
     setFieldValues(values)
     setSelectedReportId('')
     setTab('submit')
@@ -809,16 +796,40 @@ export default function ErpWorkspace({ account }: { account: Account }) {
     setFieldValues({})
   }
 
-  async function saveReport(event: FormEvent<HTMLFormElement>, submit: boolean) {
-    event.preventDefault()
+  async function saveReport(submit: boolean) {
     if (saveInProgress.current) return
     if (!selectedTemplate || !account.departmentId) {
       setError('Choose an active report template for your assigned department.')
       return
     }
-    if (!dateIsValid(periodStart) || !dateIsValid(periodEnd) || periodEnd < periodStart) {
+    const ecoCashReport = isEcoCashTemplate(selectedTemplate, account)
+    const editingReportStatus = data.reports.find((report) => report.id === editingReportId)?.status
+    const incompleteEcoCashDraft = ecoCashReport
+      && !submit
+      && (!editingReportId || editingReportStatus === 'draft')
+    const hasValidPeriod = dateIsValid(periodStart) && dateIsValid(periodEnd) && periodEnd >= periodStart
+    if (!incompleteEcoCashDraft && !hasValidPeriod) {
       setError('Enter a valid reporting period. The end date must not be before the start date.')
       return
+    }
+    if (incompleteEcoCashDraft) {
+      for (const [label, value] of [['Week commencing', periodStart], ['Week ending', periodEnd]] as const) {
+        if (value && !dateIsValid(value)) {
+          setError(`Enter a valid date for ${label}, or leave it blank while saving this draft.`)
+          return
+        }
+      }
+      if (ecoCashReport) {
+        const periodError = ecoCashPeriodError(selectedTemplate.id, submit, periodStart, periodEnd)
+        if (periodError) {
+          setError(periodError)
+          return
+        }
+      }
+      if (periodStart && periodEnd && periodEnd < periodStart) {
+        setError('Week ending cannot be before week commencing.')
+        return
+      }
     }
     const invalidDateField = selectedFields.find((field) =>
       field.field_type === 'date'
@@ -827,11 +838,6 @@ export default function ErpWorkspace({ account }: { account: Account }) {
     )
     if (invalidDateField) {
       setError(`Enter a valid date for ${invalidDateField.label}.`)
-      return
-    }
-    const ecoCashReport = isEcoCashTemplate(selectedTemplate, account)
-    if (ecoCashReport && !isMondayToSunday(periodStart, periodEnd)) {
-      setError('EcoCash reporting periods must start on Monday and end on the following Sunday.')
       return
     }
     if (ecoCashReport) {
@@ -847,16 +853,18 @@ export default function ErpWorkspace({ account }: { account: Account }) {
         setError(`Enter a valid date for ${invalidEcoCashDate.label}.`)
         return
       }
-      const invalidRegisterDate = ecoCashDays
-        .map((day, dayIndex) => {
-          const field = ecoCashMapping.mapped.get(day.id)?.date
-          const value = field ? fieldValues[field.id]?.trim() : ''
-          return field && value && value !== dateForWeekDay(periodStart, dayIndex) ? field : undefined
-        })
-        .find((field) => field !== undefined)
-      if (invalidRegisterDate) {
-        setError(`${invalidRegisterDate.label} must match its date in the selected Monday-to-Sunday week.`)
-        return
+      if (submit) {
+        const invalidRegisterDate = ecoCashDays
+          .map((day, dayIndex) => {
+            const field = ecoCashMapping.mapped.get(day.id)?.date
+            const value = field ? fieldValues[field.id]?.trim() : ''
+            return field && value && value !== dateForWeekDay(periodStart, dayIndex) ? field : undefined
+          })
+          .find((field) => field !== undefined)
+        if (invalidRegisterDate) {
+          setError(`${invalidRegisterDate.label} must match its date in the selected Monday-to-Sunday week.`)
+          return
+        }
       }
       if (submit && !ecoCashMapping.canSubmit) {
         setError('The EcoCash template fields could not be mapped unambiguously to every daily register column. Save a draft if needed, and ask an administrator to verify the template field labels before submitting.')
@@ -903,11 +911,14 @@ export default function ErpWorkspace({ account }: { account: Account }) {
       if (savedReportId) {
         const { error: updateError } = await supabase
           .from('reports')
-          .update({ report_period_start: periodStart, report_period_end: periodEnd })
+          .update({
+            report_period_start: nullableDate(periodStart),
+            report_period_end: nullableDate(periodEnd),
+          })
           .eq('id', savedReportId)
         if (updateError) throw updateError
       } else {
-        if (ecoCashReport) {
+        if (ecoCashReport && periodStart && periodEnd) {
           const { data: duplicate, error: duplicateError } = await supabase
             .from('reports')
             .select('id, status')
@@ -929,8 +940,8 @@ export default function ErpWorkspace({ account }: { account: Account }) {
             template_id: selectedTemplate.id,
             department_id: account.departmentId,
             submitted_by: account.id,
-            report_period_start: periodStart,
-            report_period_end: periodEnd,
+            report_period_start: nullableDate(periodStart),
+            report_period_end: nullableDate(periodEnd),
             status: 'draft',
           })
           .select('id')
@@ -1530,7 +1541,7 @@ function SubmitPanel({ account, departments, templates, allTemplates, fields, te
   setValues: (value: Record<string, string>) => void
   editingReportId: string
   reportStatus: ReportStatus
-  onSave: (event: FormEvent<HTMLFormElement>, submit: boolean) => void
+  onSave: (submit: boolean) => void
   onNew: () => void
   busy: boolean
 }) {
@@ -1547,8 +1558,8 @@ function SubmitPanel({ account, departments, templates, allTemplates, fields, te
       {hiddenRequiredFields.length > 0 && <div className="workspace-alert error media-hidden-required-warning" role="status"><strong>Hidden fields are still required by the database</strong><span>This Media report form omits the selected fields, but Supabase still marks {hiddenRequiredFields.map((field) => field.label).join(', ')} as required. Drafts can be saved; submission will remain blocked until an administrator updates the template’s required settings.</span></div>}
       {!templates.length && <div className="workspace-alert error"><strong>No active template is available</strong><span>No active report template is visible for your assigned department. Contact an administrator.</span></div>}
       <form className="panel form-panel workspace-form" onSubmit={(event) => {
-        const submitter = (event.nativeEvent as SubmitEvent).submitter
-        onSave(event, submitter instanceof HTMLButtonElement && submitter.value === 'submit')
+        event.preventDefault()
+        onSave(true)
       }}>
         <div className="form-intro"><div className="metric-icon blue"><FileText /></div><div><h2>{editingReportId ? 'Update report draft' : 'Create a report draft'}</h2><p>{account.firstName} {account.lastName} · {account.role} · {template?.name ?? 'Choose a report template'}</p></div>{editingReportId && <button className="outline-button" type="button" onClick={onNew}>New draft</button>}</div>
         <label className="workspace-template-field">Report template<select required value={templateId} onChange={(event) => { setTemplateId(event.target.value); setValues({}) }} disabled={Boolean(editingReportId)}><option value="">Choose an active template</option>{templates.map((item) => <option key={item.id} value={item.id}>{item.name} · v{item.version}</option>)}</select></label>
@@ -1573,7 +1584,7 @@ function SubmitPanel({ account, departments, templates, allTemplates, fields, te
             {!displayedFields.length && templateId && <p className="muted">This template has no visible fields.</p>}
           </div>
         )}
-        <div className="form-footer"><span>{selectedTemplatesNote(template, templates.length)}</span><div className="button-row"><button className="outline-button" type="submit" value="draft" formNoValidate disabled={busy || !templateId}>Save draft</button><button className="primary-button" type="submit" value="submit" disabled={busy || !templateId || Boolean(ecoCashMapping && !ecoCashMapping.canSubmit)}>Save and submit</button></div></div>
+        <div className="form-footer"><span>{selectedTemplatesNote(template, templates.length)}</span><div className="button-row"><button className="outline-button" type="button" onClick={() => onSave(false)} disabled={busy || !templateId}>Save draft</button><button className="primary-button" type="submit" disabled={busy || !templateId || Boolean(ecoCashMapping && !ecoCashMapping.canSubmit)}>Save and submit</button></div></div>
       </form>
     </div>
   )
