@@ -271,6 +271,17 @@ const ecoCashColumns = [
 ] as const
 type EcoCashColumn = (typeof ecoCashColumns)[number]['id']
 
+const hiddenMediaFieldLabels = new Set([
+  'priorities for next week',
+  'supporting links or evidence',
+  'platforms managed',
+  'content published and campaigns',
+  'total reach',
+  'total engagement',
+  'audience growth',
+  'content performance summary',
+])
+
 function messageOf(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
 }
@@ -323,6 +334,18 @@ function isEcoCashTemplate(template: Template | undefined, account: Account) {
     && template.department_id === ecoCashDepartmentId
     && template.name === ecoCashTemplateName,
   )
+}
+
+function isMediaReport(template: Template | undefined, department: Department | undefined) {
+  return Boolean(
+    template?.name.toLowerCase().includes('media')
+    && !template.name.toLowerCase().includes('ecocash')
+    && department?.name.toLowerCase() === 'media',
+  )
+}
+
+function shouldHideMediaField(template: Template | undefined, department: Department | undefined, field: ReportField) {
+  return isMediaReport(template, department) && hiddenMediaFieldLabels.has(field.label.trim().toLowerCase())
 }
 
 function dateIsValid(value: string) {
@@ -841,7 +864,21 @@ export default function ErpWorkspace({ account }: { account: Account }) {
       }
     }
     if (submit) {
-      const missing = selectedFields.find((field) => field.is_required && !fieldValues[field.id]?.trim())
+      const department = data.departments.find((item) => item.id === selectedTemplate.department_id)
+      const hiddenRequiredField = selectedFields.find((field) =>
+        field.is_required
+        && shouldHideMediaField(selectedTemplate, department, field)
+        && !fieldValues[field.id]?.trim(),
+      )
+      if (hiddenRequiredField) {
+        setError(`This Media template still marks “${hiddenRequiredField.label}” as required in Supabase. It is hidden in the form, so this report cannot be submitted until the template requirement is changed by an administrator. You can still save a draft.`)
+        return
+      }
+      const missing = selectedFields.find((field) =>
+        field.is_required
+        && !shouldHideMediaField(selectedTemplate, department, field)
+        && !fieldValues[field.id]?.trim(),
+      )
       if (missing) {
         setError(`Complete the required field: ${missing.label}.`)
         return
@@ -905,7 +942,7 @@ export default function ErpWorkspace({ account }: { account: Account }) {
       const answerRows = selectedFields.map((field) => {
         const rawValue = fieldValues[field.id] ?? ''
         const value = rawValue.trim()
-        const answer: Record<string, string | number | boolean | null> = {
+        const answer: Record<string, unknown> = {
           report_id: savedReportId,
           organization_id: account.organizationId,
           field_id: field.id,
@@ -915,7 +952,18 @@ export default function ErpWorkspace({ account }: { account: Account }) {
           value_boolean: null,
           value_json: null,
         }
-        if (value) {
+        const mediaDepartment = data.departments.find((department) => department.id === selectedTemplate.department_id)
+        const hideMediaField = shouldHideMediaField(selectedTemplate, mediaDepartment, field)
+        if (hideMediaField && !value) {
+          const existingAnswer = data.answers.find((answer) => answer.report_id === savedReportId && answer.field_id === field.id)
+          if (existingAnswer) {
+            answer.value_text = existingAnswer.value_text
+            answer.value_number = existingAnswer.value_number
+            answer.value_date = existingAnswer.value_date
+            answer.value_boolean = existingAnswer.value_boolean
+            answer.value_json = existingAnswer.value_json
+          }
+        } else if (value) {
           if (field.field_type === 'number' || field.field_type === 'currency') {
             const numericValue = Number(value)
             if (!Number.isFinite(numericValue)) throw new Error(`Enter a valid number for ${field.label}.`)
@@ -1156,7 +1204,7 @@ export default function ErpWorkspace({ account }: { account: Account }) {
                 onReload={loadPrintData}
                 onPrint={requestPrint}
               />}
-              {tab === 'submit' && <SubmitPanel account={account} templates={availableTemplates} allTemplates={data.templates} fields={data.fields} templateId={templateId} setTemplateId={setTemplateId} periodStart={periodStart} setPeriodStart={setPeriodStart} periodEnd={periodEnd} setPeriodEnd={setPeriodEnd} values={fieldValues} setValues={setFieldValues} editingReportId={editingReportId} reportStatus={data.reports.find((report) => report.id === editingReportId)?.status ?? 'draft'} onSave={saveReport} onNew={clearDraftForm} busy={busy} />}
+              {tab === 'submit' && <SubmitPanel account={account} departments={data.departments} templates={availableTemplates} allTemplates={data.templates} fields={data.fields} templateId={templateId} setTemplateId={setTemplateId} periodStart={periodStart} setPeriodStart={setPeriodStart} periodEnd={periodEnd} setPeriodEnd={setPeriodEnd} values={fieldValues} setValues={setFieldValues} editingReportId={editingReportId} reportStatus={data.reports.find((report) => report.id === editingReportId)?.status ?? 'draft'} onSave={saveReport} onNew={clearDraftForm} busy={busy} />}
               {tab === 'finance' && <FinancePanel data={data} categoryName={categoryName} setCategoryName={setCategoryName} categoryType={categoryType} setCategoryType={setCategoryType} onAddCategory={addCategory} transactionCategory={transactionCategory} setTransactionCategory={setTransactionCategory} transactionDate={transactionDate} setTransactionDate={setTransactionDate} transactionDescription={transactionDescription} setTransactionDescription={setTransactionDescription} transactionAmount={transactionAmount} setTransactionAmount={setTransactionAmount} transactionType={transactionType} setTransactionType={setTransactionType} paymentStatus={paymentStatus} setPaymentStatus={setPaymentStatus} onAddTransaction={addTransaction} busy={busy} />}
               {tab === 'staff' && <StaffPanel account={account} data={data} />}
               {tab === 'admin' && <AdminPanel data={data} departmentName={departmentName} setDepartmentName={setDepartmentName} departmentCode={departmentCode} setDepartmentCode={setDepartmentCode} onAddDepartment={addDepartment} onDepartmentActive={setDepartmentActive} busy={busy} />}
@@ -1265,7 +1313,11 @@ function ReportsPanel({ account, data, reports, search, setSearch, selectedRepor
           <div className="detail-actions"><span className={`status-pill ${statusStyles[selectedReport.status]}`}>{statusLabels[selectedReport.status]}</span><button className="outline-button" type="button" onClick={() => onSelect('')}>Close</button></div>
         </div>
         <div className="report-detail-fields">
-          {reportFields.map((field) => <div key={field.id}><span>{field.label}</span><p>{answerDisplay(reportAnswers.find((answer) => answer.field_id === field.id))}</p></div>)}
+          {reportFields.filter((field) => !shouldHideMediaField(
+            data.templates.find((template) => template.id === selectedReport.template_id),
+            data.departments.find((department) => department.id === selectedReport.department_id),
+            field,
+          )).map((field) => <div key={field.id}><span>{field.label}</span><p>{answerDisplay(reportAnswers.find((answer) => answer.field_id === field.id))}</p></div>)}
           {!reportFields.length && <EmptyState>No template fields are available for this report.</EmptyState>}
         </div>
         {ownReportManager && <p className="schema-footnote self-review-warning">Review actions are disabled for your own report in this interface. The exported review_report function does not itself reject self-review for a boss/admin account that also holds the worker role; a database-side guard is needed to enforce this against direct RPC calls.</p>}
@@ -1326,6 +1378,7 @@ function PrintReportDocument({ report, data, variant = 'print' }: { report: Repo
   const employee = data.profiles.find((item) => item.id === report.submitted_by)
   const fields = data.fields
     .filter((field) => field.template_id === report.template_id)
+    .filter((field) => !shouldHideMediaField(template, department, field))
     .sort((left, right) => left.sort_order - right.sort_order)
   const answers = data.answers.filter((answer) => answer.report_id === report.id)
   const reviews = data.reviews.filter((review) => review.report_id === report.id)
@@ -1461,8 +1514,9 @@ function PrintReportsPanel({ account, data, reports, loading, error, department,
   )
 }
 
-function SubmitPanel({ account, templates, allTemplates, fields, templateId, setTemplateId, periodStart, setPeriodStart, periodEnd, setPeriodEnd, values, setValues, editingReportId, reportStatus, onSave, onNew, busy }: {
+function SubmitPanel({ account, departments, templates, allTemplates, fields, templateId, setTemplateId, periodStart, setPeriodStart, periodEnd, setPeriodEnd, values, setValues, editingReportId, reportStatus, onSave, onNew, busy }: {
   account: Account
+  departments: Department[]
   templates: Template[]
   allTemplates: Template[]
   fields: ReportField[]
@@ -1482,11 +1536,15 @@ function SubmitPanel({ account, templates, allTemplates, fields, templateId, set
 }) {
   const template = allTemplates.find((item) => item.id === templateId)
   const templateFields = fields.filter((field) => field.template_id === templateId)
+  const department = departments.find((item) => item.id === template?.department_id)
+  const displayedFields = templateFields.filter((field) => !shouldHideMediaField(template, department, field))
+  const hiddenRequiredFields = templateFields.filter((field) => field.is_required && shouldHideMediaField(template, department, field))
   const ecoCash = isEcoCashTemplate(template, account)
   const ecoCashMapping = ecoCash ? mapEcoCashFields(templateFields) : undefined
   return (
     <div className="content-stack">
       <div className="schema-notice"><strong>{editingReportId ? 'Editing an existing draft' : 'Drafts are saved before submission'}</strong><p>New reports are inserted with status draft. Answers can be edited under RLS; submitting calls the database submit_report workflow, which validates ownership, department and required answers.</p></div>
+      {hiddenRequiredFields.length > 0 && <div className="workspace-alert error media-hidden-required-warning" role="status"><strong>Hidden fields are still required by the database</strong><span>This Media report form omits the selected fields, but Supabase still marks {hiddenRequiredFields.map((field) => field.label).join(', ')} as required. Drafts can be saved; submission will remain blocked until an administrator updates the template’s required settings.</span></div>}
       {!templates.length && <div className="workspace-alert error"><strong>No active template is available</strong><span>No active report template is visible for your assigned department. Contact an administrator.</span></div>}
       <form className="panel form-panel workspace-form" onSubmit={(event) => {
         const submitter = (event.nativeEvent as SubmitEvent).submitter
@@ -1511,8 +1569,8 @@ function SubmitPanel({ account, templates, allTemplates, fields, templateId, set
           <div className="form-fields">
             <label>Reporting period start<input type="date" required value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} /></label>
             <label>Reporting period end<input type="date" required min={periodStart || undefined} value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} /></label>
-            {templateFields.map((field) => <ReportFieldInput key={field.id} field={field} value={values[field.id] ?? ''} onChange={(value) => setValues({ ...values, [field.id]: value })} />)}
-            {!templateFields.length && templateId && <p className="muted">This template has no visible fields.</p>}
+            {displayedFields.map((field) => <ReportFieldInput key={field.id} field={field} value={values[field.id] ?? ''} onChange={(value) => setValues({ ...values, [field.id]: value })} />)}
+            {!displayedFields.length && templateId && <p className="muted">This template has no visible fields.</p>}
           </div>
         )}
         <div className="form-footer"><span>{selectedTemplatesNote(template, templates.length)}</span><div className="button-row"><button className="outline-button" type="submit" value="draft" formNoValidate disabled={busy || !templateId}>Save draft</button><button className="primary-button" type="submit" value="submit" disabled={busy || !templateId || Boolean(ecoCashMapping && !ecoCashMapping.canSubmit)}>Save and submit</button></div></div>
