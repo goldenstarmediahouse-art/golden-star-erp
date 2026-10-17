@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { ArrowUpRight } from 'lucide-react'
 import { createSupabaseBrowserClient } from '@/lib/supabase/browser'
@@ -94,6 +95,7 @@ export default function AuthForm({
               Send a reset link
             </button>
           </p>
+          <p className="auth-switch">New worker? <Link href="/signup">Create a worker account</Link></p>
         </div>
       </section>
     </main>

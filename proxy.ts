@@ -26,6 +26,22 @@ export async function proxy(request: NextRequest) {
   })
 
   const { error } = await supabase.auth.getUser()
+  const expiredSession =
+    error?.code === 'refresh_token_not_found' ||
+    error?.code === 'invalid_refresh_token' ||
+    error?.code === 'refresh_token_already_used'
+
+  if (expiredSession) {
+    const loginUrl = new URL('/login', request.url)
+    response = request.nextUrl.pathname === '/login'
+      ? NextResponse.next({ request })
+      : NextResponse.redirect(loginUrl)
+    request.cookies.getAll()
+      .filter(({ name }) => name.startsWith('sb-') && name.includes('-auth-token'))
+      .forEach(({ name }) => response.cookies.delete(name))
+    return response
+  }
+
   if (error && error.name !== 'AuthSessionMissingError') {
     throw new Error(`Supabase session refresh failed: ${error.message}`)
   }

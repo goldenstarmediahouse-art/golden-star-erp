@@ -27,5 +27,29 @@ export async function GET(request: NextRequest) {
   const { error } = await supabase.auth.exchangeCodeForSession(code)
   if (error) return NextResponse.redirect(new URL('/login?error=callback', request.url))
 
+  const { data: { user }, error: userError } = await supabase.auth.getUser()
+  if (userError) {
+    response.headers.set('Location', new URL('/signup?error=callback', request.url).toString())
+    return response
+  }
+
+  const metadata = user?.user_metadata
+  const departmentId = metadata?.requested_department_id
+  if (
+    typeof departmentId === 'string' &&
+    typeof metadata?.first_name === 'string' &&
+    typeof metadata?.last_name === 'string'
+  ) {
+    const { error: provisionError } = await supabase.rpc('provision_worker_signup', {
+      _department_id: departmentId,
+      _first_name: metadata.first_name,
+      _last_name: metadata.last_name,
+    })
+    if (provisionError) {
+      response.headers.set('Location', new URL('/signup?error=provision', request.url).toString())
+      return response
+    }
+  }
+
   return response
 }
