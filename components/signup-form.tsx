@@ -1,5 +1,6 @@
 'use client'
 
+import Image from 'next/image'
 import { useEffect, useState, type FormEvent } from 'react'
 import Link from 'next/link'
 import { ArrowUpRight } from 'lucide-react'
@@ -113,16 +114,15 @@ export default function SignupForm({
   return (
     <main className="auth-shell">
       <section className="auth-brand-panel">
-        <div className="auth-brand-mark">GS</div>
+        <Image className="auth-brand-mark" src="/logo/golden%20star%20logo.png" alt="Golden Star Media House" width={720} height={333} priority />
         <p className="auth-kicker">INTERNAL BUSINESS SYSTEM</p>
-        <h1>Golden Star<br />Media House</h1>
         <p>Worker registration</p>
         <div className="auth-brand-rule" />
         <span>Sign up with your work email. Your worker role and department are validated by Supabase before ERP access is granted.</span>
       </section>
       <section className="auth-form-panel">
         <div className="auth-form-wrap signup-form-wrap">
-          <div className="auth-mobile-brand"><div className="auth-brand-mark">GS</div><strong>Golden Star Media House</strong></div>
+          <div className="auth-mobile-brand"><Image className="auth-brand-mark" src="/logo/golden%20star%20logo.png" alt="Golden Star Media House" width={720} height={333} priority /></div>
           <p className="eyebrow">New employee</p>
           <h2>Create a worker account</h2>
           <p className="auth-subtitle">Your selected department is assigned by the database; role and report access are enforced by RLS.</p>

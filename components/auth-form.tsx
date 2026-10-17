@@ -1,5 +1,6 @@
 'use client'
 
+import Image from 'next/image'
 import { useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -63,16 +64,15 @@ export default function AuthForm({
   return (
     <main className="auth-shell">
       <section className="auth-brand-panel">
-        <div className="auth-brand-mark">GS</div>
+        <Image className="auth-brand-mark" src="/logo/golden%20star%20logo.png" alt="Golden Star Media House" width={720} height={333} priority />
         <p className="auth-kicker">INTERNAL BUSINESS SYSTEM</p>
-        <h1>Golden Star<br />Media House</h1>
         <p>ERP System</p>
         <div className="auth-brand-rule" />
         <span>Operational reporting, financial control and department performance.</span>
       </section>
       <section className="auth-form-panel">
         <div className="auth-form-wrap">
-          <div className="auth-mobile-brand"><div className="auth-brand-mark">GS</div><strong>Golden Star Media House</strong></div>
+          <div className="auth-mobile-brand"><Image className="auth-brand-mark" src="/logo/golden%20star%20logo.png" alt="Golden Star Media House" width={720} height={333} priority /></div>
           <p className="eyebrow">Welcome back</p>
           <h2>Sign in to ERP System</h2>
           <p className="auth-subtitle">Use your company account to continue.</p>

@@ -1,6 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import Image from 'next/image'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import {
   ArrowDownRight,
   ArrowUpRight,
@@ -13,6 +14,8 @@ import {
   Home,
   LogOut,
   Plus,
+  Printer,
+  RefreshCw,
   ShieldCheck,
   Users,
   WalletCards,
@@ -22,7 +25,7 @@ import { useRouter } from 'next/navigation'
 import { createSupabaseBrowserClient } from '@/lib/supabase/browser'
 
 export type WorkspaceRole = 'worker' | 'boss' | 'admin'
-type Tab = 'overview' | 'reports' | 'submit' | 'finance' | 'staff' | 'admin'
+type Tab = 'overview' | 'reports' | 'submit' | 'finance' | 'staff' | 'admin' | 'print'
 type ReportStatus = 'draft' | 'submitted' | 'under_review' | 'approved' | 'revision_requested' | 'rejected'
 type FieldType = 'text' | 'textarea' | 'number' | 'currency' | 'date' | 'select' | 'checkbox'
 
@@ -58,6 +61,7 @@ type Department = {
 
 type Template = {
   id: string
+  organization_id: string
   department_id: string
   name: string
   version: number
@@ -102,6 +106,7 @@ type ReportAnswer = {
 }
 
 type ReportReview = {
+  id: string
   report_id: string
   reviewer_id: string
   previous_status: string
@@ -173,6 +178,13 @@ type WorkspaceData = {
   roleByUser: Record<string, string[]>
 }
 
+type PrintDataset = Pick<WorkspaceData, 'departments' | 'profiles' | 'templates' | 'fields' | 'reports' | 'answers' | 'reviews'>
+
+type PageResult<T> = {
+  data: T[] | null
+  error: { message: string } | null
+}
+
 const emptyData: WorkspaceData = {
   departments: [],
   profiles: [],
@@ -187,6 +199,35 @@ const emptyData: WorkspaceData = {
   notifications: [],
   audit: [],
   roleByUser: {},
+}
+
+async function fetchAllPages<T>(
+  createRequest: (from: number, to: number) => PromiseLike<PageResult<T>>,
+  operation: string,
+  pageSize = 200,
+) {
+  const rows: T[] = []
+  for (let offset = 0; ; offset += pageSize) {
+    const result = await createRequest(offset, offset + pageSize - 1)
+    ensureNoQueryError(result, operation)
+    const page = result.data ?? []
+    rows.push(...page)
+    if (page.length < pageSize) return rows
+  }
+}
+
+async function fetchByIdBatches<T>(
+  ids: string[],
+  createRequest: (batch: string[], from: number, to: number) => PromiseLike<PageResult<T>>,
+  operation: string,
+) {
+  const rows: T[] = []
+  const batchSize = 100
+  for (let index = 0; index < ids.length; index += batchSize) {
+    const batch = ids.slice(index, index + batchSize)
+    rows.push(...await fetchAllPages((from, to) => createRequest(batch, from, to), operation))
+  }
+  return rows
 }
 
 const statusLabels: Record<ReportStatus, string> = {
@@ -206,6 +247,29 @@ const statusStyles: Record<ReportStatus, string> = {
   revision_requested: 'status-amber',
   rejected: 'status-red',
 }
+
+const ecoCashOrganizationId = '825dcc70-7f64-4da5-806f-3e43fcb9f0db'
+const ecoCashDepartmentId = '1d871f18-18d3-452b-8974-6b9182410880'
+const ecoCashTemplateName = 'EcoCash Weekly Float Register'
+const ecoCashDays = [
+  { id: 'monday', label: 'Monday', short: 'mon' },
+  { id: 'tuesday', label: 'Tuesday', short: 'tue' },
+  { id: 'wednesday', label: 'Wednesday', short: 'wed' },
+  { id: 'thursday', label: 'Thursday', short: 'thu' },
+  { id: 'friday', label: 'Friday', short: 'fri' },
+  { id: 'saturday', label: 'Saturday', short: 'sat' },
+  { id: 'sunday', label: 'Sunday', short: 'sun' },
+] as const
+const ecoCashColumns = [
+  { id: 'date', label: 'Date' },
+  { id: 'deductions', label: 'Cash Deductions' },
+  { id: 'cashInFloat', label: 'Cash in Float' },
+  { id: 'cashInHand', label: 'Cash in Hand' },
+  { id: 'finalFloat', label: 'Final Float' },
+  { id: 'manager', label: "Manager's Signature / Approval" },
+  { id: 'assistant', label: "Shop Assistant's Signature / Sign-off" },
+] as const
+type EcoCashColumn = (typeof ecoCashColumns)[number]['id']
 
 function messageOf(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
@@ -250,6 +314,93 @@ function readSelectOptions(value: unknown): string[] {
   })
 }
 
+function isEcoCashTemplate(template: Template | undefined, account: Account) {
+  return Boolean(
+    template
+    && account.organizationId === ecoCashOrganizationId
+    && account.departmentId === ecoCashDepartmentId
+    && template.organization_id === ecoCashOrganizationId
+    && template.department_id === ecoCashDepartmentId
+    && template.name === ecoCashTemplateName,
+  )
+}
+
+function dateIsValid(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const parsed = new Date(`${value}T00:00:00Z`)
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
+}
+
+function dateForWeekDay(weekStart: string, offset: number) {
+  if (!dateIsValid(weekStart)) return ''
+  const date = new Date(`${weekStart}T00:00:00Z`)
+  date.setUTCDate(date.getUTCDate() + offset)
+  return date.toISOString().slice(0, 10)
+}
+
+function isMondayToSunday(start: string, end: string) {
+  if (!dateIsValid(start) || !dateIsValid(end)) return false
+  const startDate = new Date(`${start}T00:00:00Z`)
+  return startDate.getUTCDay() === 1 && dateForWeekDay(start, 6) === end
+}
+
+function mapEcoCashFields(fields: ReportField[]) {
+  const mapped = new Map<string, Partial<Record<EcoCashColumn, ReportField>>>()
+  const candidates = new Map<string, ReportField[]>()
+  const dailyFieldIds = new Set<string>()
+  const unmappedDailyFields: ReportField[] = []
+
+  for (const field of fields) {
+    const fieldName = `${field.field_key.replace(/[_-]/g, ' ')} ${field.label}`.toLowerCase()
+    const days = ecoCashDays.filter((day) => new RegExp(`\\b(?:${day.id}|${day.short})\\b`).test(fieldName))
+    if (days.length !== 1) continue
+    dailyFieldIds.add(field.id)
+
+    let column: EcoCashColumn | undefined
+    if (/shop assistant/.test(fieldName) && /(signature|sign.?off)/.test(fieldName)) column = 'assistant'
+    else if (/manager/.test(fieldName) && /(signature|approval|sign.?off)/.test(fieldName)) column = 'manager'
+    else if (/\bdate\b/.test(fieldName)) column = 'date'
+    else if (/cash\s*deductions?|\bdeductions?\b/.test(fieldName)) column = 'deductions'
+    else if (/cash\s*in\s*float|float\s*cash|cash_float/.test(fieldName)) column = 'cashInFloat'
+    else if (/cash\s*in\s*hand|cash_hand/.test(fieldName)) column = 'cashInHand'
+    else if (/final\s*float|closing\s*float/.test(fieldName)) column = 'finalFloat'
+
+    if (!column) {
+      unmappedDailyFields.push(field)
+      continue
+    }
+
+    const key = `${days[0].id}:${column}`
+    const matchingFields = candidates.get(key) ?? []
+    matchingFields.push(field)
+    candidates.set(key, matchingFields)
+  }
+
+  for (const [key, matchingFields] of candidates) {
+    if (matchingFields.length !== 1) continue
+    const [dayId, column] = key.split(':') as [string, EcoCashColumn]
+    mapped.set(dayId, { ...mapped.get(dayId), [column]: matchingFields[0] })
+  }
+
+  const duplicateCells = [...candidates.entries()]
+    .filter(([, matchingFields]) => matchingFields.length > 1)
+    .map(([key]) => key.replace(':', ' / '))
+  const missingCells = ecoCashDays.flatMap((day) =>
+    ecoCashColumns
+      .filter((column) => column.id !== 'date' && !mapped.get(day.id)?.[column.id])
+      .map((column) => `${day.label} ${column.label}`),
+  )
+
+  return {
+    mapped,
+    dailyFieldIds,
+    unmappedDailyFields,
+    duplicateCells,
+    missingCells,
+    canSubmit: !unmappedDailyFields.length && !duplicateCells.length && !missingCells.length,
+  }
+}
+
 export default function ErpWorkspace({ account }: { account: Account }) {
   const router = useRouter()
   const supabase = useMemo(() => createSupabaseBrowserClient(), [])
@@ -278,6 +429,20 @@ export default function ErpWorkspace({ account }: { account: Account }) {
   const [paymentStatus, setPaymentStatus] = useState<'recorded' | 'pending' | 'paid' | 'cancelled'>('recorded')
   const [departmentName, setDepartmentName] = useState('')
   const [departmentCode, setDepartmentCode] = useState('')
+  const saveInProgress = useRef(false)
+  const printInProgress = useRef(false)
+  const [printData, setPrintData] = useState<PrintDataset | null>(null)
+  const [printLoading, setPrintLoading] = useState(false)
+  const [printError, setPrintError] = useState('')
+  const [printDepartment, setPrintDepartment] = useState('')
+  const [printTemplate, setPrintTemplate] = useState('')
+  const [printEmployee, setPrintEmployee] = useState('')
+  const [printStatus, setPrintStatus] = useState('')
+  const [printDateStart, setPrintDateStart] = useState('')
+  const [printDateEnd, setPrintDateEnd] = useState('')
+  const [previewReportId, setPreviewReportId] = useState('')
+  const [printReportIds, setPrintReportIds] = useState<string[]>([])
+  const [printRequested, setPrintRequested] = useState(false)
 
   const canManage = account.role === 'boss' || account.role === 'admin'
   const isAdmin = account.role === 'admin'
@@ -299,7 +464,8 @@ export default function ErpWorkspace({ account }: { account: Account }) {
         .limit(200)
       const templatesRequest = supabase
         .from('report_templates')
-        .select('id, department_id, name, version, is_active')
+        .select('id, organization_id, department_id, name, version, is_active')
+        .eq('organization_id', account.organizationId)
         .order('name')
         .limit(200)
       const profilesRequest = supabase
@@ -361,13 +527,13 @@ export default function ErpWorkspace({ account }: { account: Account }) {
 
       const [fieldsResult, answersResult, reviewsResult, roleNamesResult] = await Promise.all([
         templateIds.length
-          ? supabase.from('report_fields').select('id, template_id, field_key, label, field_type, is_required, sort_order, options, validation_rules').in('template_id', templateIds).order('sort_order')
+          ? supabase.from('report_fields').select('id, template_id, field_key, label, field_type, is_required, sort_order, options, validation_rules').in('template_id', templateIds).order('sort_order', { ascending: true })
           : Promise.resolve({ data: [], error: null }),
         reportIds.length
           ? supabase.from('report_answers').select('report_id, field_id, value_text, value_number, value_date, value_boolean, value_json').in('report_id', reportIds)
           : Promise.resolve({ data: [], error: null }),
         reportIds.length
-          ? supabase.from('report_reviews').select('report_id, reviewer_id, previous_status, new_status, review_comment, created_at').in('report_id', reportIds).order('created_at', { ascending: false })
+          ? supabase.from('report_reviews').select('id, report_id, reviewer_id, previous_status, new_status, review_comment, created_at').in('report_id', reportIds).order('created_at', { ascending: false })
           : Promise.resolve({ data: [], error: null }),
         isAdmin && rolesResult.data?.length
           ? supabase.from('roles').select('id, name').in('id', rolesResult.data.map((membership) => membership.role_id))
@@ -410,15 +576,123 @@ export default function ErpWorkspace({ account }: { account: Account }) {
     }
   }, [account.organizationId, canManage, isAdmin, supabase])
 
+  const loadPrintData = useCallback(async () => {
+    if (!canManage) {
+      setPrintError('Reports & Printing is available only to authorized Boss and Admin accounts.')
+      return
+    }
+    if (printInProgress.current) return
+    printInProgress.current = true
+    setPrintLoading(true)
+    setPrintError('')
+    setPrintData(null)
+    setPreviewReportId('')
+    setPrintReportIds([])
+    try {
+      const reports = await fetchAllPages(
+        (from, to) => supabase
+          .from('reports')
+          .select('id, organization_id, template_id, department_id, submitted_by, report_period_start, report_period_end, status, submitted_at, reviewed_at, created_at, updated_at')
+          .eq('organization_id', account.organizationId)
+          .order('created_at', { ascending: false })
+          .order('id', { ascending: true })
+          .range(from, to),
+        'Could not load every report permitted by your account',
+      ) as Report[]
+      const templateIds = [...new Set(reports.map((report) => report.template_id))]
+      const departmentIds = [...new Set(reports.map((report) => report.department_id))]
+      const employeeIds = [...new Set(reports.map((report) => report.submitted_by))]
+      const reportIds = reports.map((report) => report.id)
+      const [templates, departments, submitterProfiles, answers, reviews] = await Promise.all([
+        fetchByIdBatches(templateIds, (ids, from, to) => supabase
+          .from('report_templates')
+          .select('id, organization_id, department_id, name, version, is_active')
+          .eq('organization_id', account.organizationId)
+          .in('id', ids)
+          .range(from, to), 'Could not load report templates for printing') as Promise<Template[]>,
+        fetchByIdBatches(departmentIds, (ids, from, to) => supabase
+          .from('departments')
+          .select('id, name, code, manager_user_id, is_active')
+          .eq('organization_id', account.organizationId)
+          .in('id', ids)
+          .range(from, to), 'Could not load report departments for printing') as Promise<Department[]>,
+        fetchByIdBatches(employeeIds, (ids, from, to) => supabase
+          .from('profiles')
+          .select('id, email, first_name, last_name, phone, job_title, department_id, status')
+          .eq('organization_id', account.organizationId)
+          .in('id', ids)
+          .range(from, to), 'Could not load report employee names for printing') as Promise<Profile[]>,
+        fetchByIdBatches(reportIds, (ids, from, to) => supabase
+          .from('report_answers')
+          .select('report_id, field_id, value_text, value_number, value_date, value_boolean, value_json')
+          .eq('organization_id', account.organizationId)
+          .in('report_id', ids)
+          .order('report_id', { ascending: true })
+          .order('field_id', { ascending: true })
+          .range(from, to), 'Could not load report answers for printing') as Promise<ReportAnswer[]>,
+        fetchByIdBatches(reportIds, (ids, from, to) => supabase
+          .from('report_reviews')
+          .select('id, report_id, reviewer_id, previous_status, new_status, review_comment, created_at')
+          .eq('organization_id', account.organizationId)
+          .in('report_id', ids)
+          .order('created_at', { ascending: false })
+          .order('id', { ascending: true })
+          .range(from, to), 'Could not load report approvals for printing') as Promise<ReportReview[]>,
+      ])
+      const submitterProfileIds = new Set(submitterProfiles.map((profile) => profile.id))
+      const reviewerIds = [...new Set(reviews.map((review) => review.reviewer_id))]
+        .filter((reviewerId) => !submitterProfileIds.has(reviewerId))
+      const reviewerProfiles = await fetchByIdBatches(reviewerIds, (ids, from, to) => supabase
+        .from('profiles')
+        .select('id, email, first_name, last_name, phone, job_title, department_id, status')
+        .eq('organization_id', account.organizationId)
+        .in('id', ids)
+        .range(from, to), 'Could not load report reviewer names for printing') as Profile[]
+      const fields = await fetchByIdBatches(templateIds, (ids, from, to) => supabase
+        .from('report_fields')
+        .select('id, template_id, field_key, label, field_type, is_required, sort_order, options, validation_rules')
+        .in('template_id', ids)
+        .order('sort_order', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, to), 'Could not load sorted report fields for printing') as ReportField[]
+
+      setPrintData({ reports, templates, departments, profiles: [...submitterProfiles, ...reviewerProfiles], fields, answers, reviews })
+    } catch (cause) {
+      setPrintError(messageOf(cause, 'Could not load all authorized print records. No print action is available until loading succeeds.'))
+    } finally {
+      printInProgress.current = false
+      setPrintLoading(false)
+    }
+  }, [account.organizationId, canManage, supabase])
+
   useEffect(() => {
     void loadData()
   }, [loadData])
+
+  useEffect(() => {
+    if (tab === 'print' && canManage && !printData && !printLoading && !printError) {
+      void loadPrintData()
+    }
+  }, [canManage, loadPrintData, printData, printError, printLoading, tab])
+
+  useEffect(() => {
+    if (!printRequested || !printReportIds.length) return
+    setPrintRequested(false)
+    window.requestAnimationFrame(() => {
+      const images = [...document.querySelectorAll<HTMLImageElement>('.print-document img')]
+      void Promise.all(images.map((image) => image.decode())).then(() => {
+        window.print()
+      }).catch(() => {
+        setPrintError('The company logo could not be loaded for printing. Check the logo asset and try again.')
+      })
+    })
+  }, [printReportIds, printRequested])
 
   const selectedReport = data.reports.find((report) => report.id === selectedReportId)
   const selectedTemplate = data.templates.find((template) => template.id === templateId)
   const selectedFields = data.fields.filter((field) => field.template_id === templateId)
   const selectedDepartment = data.departments.find((department) => department.id === account.departmentId)
-  const availableTemplates = data.templates.filter((template) => template.is_active && template.department_id === account.departmentId)
+  const availableTemplates = data.templates.filter((template) => template.is_active && template.organization_id === account.organizationId && template.department_id === account.departmentId)
   const visibleReports = data.reports.filter((report) => {
     const templateName = data.templates.find((template) => template.id === report.template_id)?.name ?? ''
     const employee = data.profiles.find((profile) => profile.id === report.submitted_by)
@@ -429,6 +703,39 @@ export default function ErpWorkspace({ account }: { account: Account }) {
   const expenseCount = data.transactions.filter((transaction) => transaction.type === 'expense').length
   const pendingReports = data.reports.filter((report) => report.status === 'submitted' || report.status === 'under_review').length
   const unreadNotifications = data.notifications.filter((notification) => !notification.is_read).length
+  const printDateRangeValid = !printDateStart || !printDateEnd || printDateStart <= printDateEnd
+  const printReports = printData?.reports.filter((report) => {
+    const statusMatch = !printStatus || report.status === printStatus
+    const dateMatch = (!printDateStart || report.report_period_end >= printDateStart)
+      && (!printDateEnd || report.report_period_start <= printDateEnd)
+    return printDateRangeValid
+      && (!printDepartment || report.department_id === printDepartment)
+      && (!printTemplate || report.template_id === printTemplate)
+      && (!printEmployee || report.submitted_by === printEmployee)
+      && statusMatch
+      && dateMatch
+  }) ?? []
+  const printPreviewReports = printData
+    ? printReportIds.length
+      ? printReportIds.flatMap((id) => {
+        const report = printData.reports.find((item) => item.id === id)
+        return report ? [report] : []
+      })
+      : previewReportId
+        ? printData.reports.filter((report) => report.id === previewReportId)
+        : []
+    : []
+
+  function requestPrint(reportIds: string[]) {
+    if (!canManage || !printData || !reportIds.length || reportIds.some((id) => !printData.reports.some((report) => report.id === id))) {
+      setPrintError('No authorized records are ready to print. Reload the filtered records and try again.')
+      return
+    }
+    setPrintError('')
+    setPreviewReportId(reportIds.length === 1 ? reportIds[0] : '')
+    setPrintReportIds(reportIds)
+    setPrintRequested(true)
+  }
 
   async function signOut() {
     setBusy(true)
@@ -451,9 +758,15 @@ export default function ErpWorkspace({ account }: { account: Account }) {
     for (const answer of answers) {
       const field = data.fields.find((candidate) => candidate.id === answer.field_id)
       if (!field) continue
-      values[field.id] = answer.value_text ?? (answer.value_number === null ? '' : String(answer.value_number)) ?? ''
-      if (answer.value_date !== null) values[field.id] = answer.value_date
-      if (answer.value_boolean !== null) values[field.id] = String(answer.value_boolean)
+      if (answer.value_text !== null) values[field.id] = answer.value_text
+      else if (answer.value_number !== null) values[field.id] = String(answer.value_number)
+      else if (answer.value_date !== null) values[field.id] = answer.value_date
+      else if (answer.value_boolean !== null) values[field.id] = String(answer.value_boolean)
+      else if (answer.value_json !== null) {
+        values[field.id] = typeof answer.value_json === 'string'
+          ? answer.value_json
+          : JSON.stringify(answer.value_json)
+      } else values[field.id] = ''
     }
     setEditingReportId(report.id)
     setTemplateId(report.template_id)
@@ -475,13 +788,57 @@ export default function ErpWorkspace({ account }: { account: Account }) {
 
   async function saveReport(event: FormEvent<HTMLFormElement>, submit: boolean) {
     event.preventDefault()
+    if (saveInProgress.current) return
     if (!selectedTemplate || !account.departmentId) {
       setError('Choose an active report template for your assigned department.')
       return
     }
-    if (!periodStart || !periodEnd || periodEnd < periodStart) {
+    if (!dateIsValid(periodStart) || !dateIsValid(periodEnd) || periodEnd < periodStart) {
       setError('Enter a valid reporting period. The end date must not be before the start date.')
       return
+    }
+    const invalidDateField = selectedFields.find((field) =>
+      field.field_type === 'date'
+      && Boolean(fieldValues[field.id]?.trim())
+      && !dateIsValid(fieldValues[field.id].trim()),
+    )
+    if (invalidDateField) {
+      setError(`Enter a valid date for ${invalidDateField.label}.`)
+      return
+    }
+    const ecoCashReport = isEcoCashTemplate(selectedTemplate, account)
+    if (ecoCashReport && !isMondayToSunday(periodStart, periodEnd)) {
+      setError('EcoCash reporting periods must start on Monday and end on the following Sunday.')
+      return
+    }
+    if (ecoCashReport) {
+      const ecoCashMapping = mapEcoCashFields(selectedFields)
+      const invalidEcoCashDate = ecoCashDays
+        .map((day) => ecoCashMapping.mapped.get(day.id)?.date)
+        .find((field) => {
+          if (!field) return false
+          const value = fieldValues[field.id]?.trim()
+          return value ? !dateIsValid(value) : false
+        })
+      if (invalidEcoCashDate) {
+        setError(`Enter a valid date for ${invalidEcoCashDate.label}.`)
+        return
+      }
+      const invalidRegisterDate = ecoCashDays
+        .map((day, dayIndex) => {
+          const field = ecoCashMapping.mapped.get(day.id)?.date
+          const value = field ? fieldValues[field.id]?.trim() : ''
+          return field && value && value !== dateForWeekDay(periodStart, dayIndex) ? field : undefined
+        })
+        .find((field) => field !== undefined)
+      if (invalidRegisterDate) {
+        setError(`${invalidRegisterDate.label} must match its date in the selected Monday-to-Sunday week.`)
+        return
+      }
+      if (submit && !ecoCashMapping.canSubmit) {
+        setError('The EcoCash template fields could not be mapped unambiguously to every daily register column. Save a draft if needed, and ask an administrator to verify the template field labels before submitting.')
+        return
+      }
     }
     if (submit) {
       const missing = selectedFields.find((field) => field.is_required && !fieldValues[field.id]?.trim())
@@ -500,6 +857,7 @@ export default function ErpWorkspace({ account }: { account: Account }) {
       return
     }
 
+    saveInProgress.current = true
     setBusy(true)
     setError('')
     setNotice('')
@@ -512,6 +870,21 @@ export default function ErpWorkspace({ account }: { account: Account }) {
           .eq('id', savedReportId)
         if (updateError) throw updateError
       } else {
+        if (ecoCashReport) {
+          const { data: duplicate, error: duplicateError } = await supabase
+            .from('reports')
+            .select('id, status')
+            .eq('organization_id', account.organizationId)
+            .eq('template_id', selectedTemplate.id)
+            .eq('submitted_by', account.id)
+            .eq('report_period_start', periodStart)
+            .eq('report_period_end', periodEnd)
+            .maybeSingle()
+          if (duplicateError) throw duplicateError
+          if (duplicate) {
+            throw new Error(`An EcoCash report already exists for this week (${statusLabels[duplicate.status as ReportStatus] ?? duplicate.status}). Open Reports to continue an existing draft or review its status.`)
+          }
+        }
         const { data: inserted, error: insertError } = await supabase
           .from('reports')
           .insert({
@@ -540,6 +913,7 @@ export default function ErpWorkspace({ account }: { account: Account }) {
           value_number: null,
           value_date: null,
           value_boolean: null,
+          value_json: null,
         }
         if (value) {
           if (field.field_type === 'number' || field.field_type === 'currency') {
@@ -580,6 +954,7 @@ export default function ErpWorkspace({ account }: { account: Account }) {
       if (savedReportId && !editingReportId) setEditingReportId(savedReportId)
       await loadData()
     } finally {
+      saveInProgress.current = false
       setBusy(false)
     }
   }
@@ -709,6 +1084,7 @@ export default function ErpWorkspace({ account }: { account: Account }) {
     { id: 'overview', label: 'Overview', icon: Home, roles: ['worker', 'boss', 'admin'] },
     { id: 'reports', label: 'Reports', icon: ClipboardList, roles: ['worker', 'boss', 'admin'] },
     { id: 'submit', label: 'Submit report', icon: FileText, roles: ['worker'] },
+    { id: 'print', label: 'Reports & Printing', icon: Printer, roles: ['boss', 'admin'] },
     { id: 'finance', label: 'Finance', icon: WalletCards, roles: ['boss', 'admin'] },
     { id: 'staff', label: 'Employees', icon: Users, roles: ['boss', 'admin'] },
     { id: 'admin', label: 'Departments & audit', icon: ShieldCheck, roles: ['admin'] },
@@ -717,7 +1093,7 @@ export default function ErpWorkspace({ account }: { account: Account }) {
   return (
     <div className="erp-shell">
       <aside className={`erp-sidebar workspace-sidebar ${mobileNav ? 'is-open' : ''}`}>
-        <div className="sidebar-brand"><div className="brand-mark">GS</div><div><strong>Golden Star</strong><span>Media House</span></div></div>
+        <div className="sidebar-brand"><Image className="brand-mark" src="/logo/golden%20star%20logo.png" alt="Golden Star Media House" width={720} height={333} priority /></div>
         <div className="workspace-label">WORKSPACE</div>
         <nav className="sidebar-nav" aria-label="ERP navigation">
           {navigation.filter((item) => item.roles.includes(account.role)).map(({ id, label, icon: Icon }) => (
@@ -756,7 +1132,31 @@ export default function ErpWorkspace({ account }: { account: Account }) {
             <>
               {tab === 'overview' && <Overview account={account} data={data} pendingReports={pendingReports} unreadNotifications={unreadNotifications} incomeCount={incomeCount} expenseCount={expenseCount} onTab={setTab} onReport={(id) => { setSelectedReportId(id); setTab('reports') }} />}
               {tab === 'reports' && <ReportsPanel account={account} data={data} reports={visibleReports} search={search} setSearch={setSearch} selectedReport={selectedReport} onSelect={setSelectedReportId} onEdit={openDraft} onReview={reviewReport} reviewComment={reviewComment} setReviewComment={setReviewComment} busy={busy} />}
-              {tab === 'submit' && <SubmitPanel account={account} templates={availableTemplates} allTemplates={data.templates} fields={data.fields} templateId={templateId} setTemplateId={setTemplateId} periodStart={periodStart} setPeriodStart={setPeriodStart} periodEnd={periodEnd} setPeriodEnd={setPeriodEnd} values={fieldValues} setValues={setFieldValues} editingReportId={editingReportId} onSave={saveReport} onNew={clearDraftForm} busy={busy} />}
+              {tab === 'print' && <PrintReportsPanel
+                account={account}
+                data={printData}
+                reports={printReports}
+                loading={printLoading}
+                error={printError}
+                department={printDepartment}
+                setDepartment={setPrintDepartment}
+                template={printTemplate}
+                setTemplate={setPrintTemplate}
+                employee={printEmployee}
+                setEmployee={setPrintEmployee}
+                status={printStatus}
+                setStatus={setPrintStatus}
+                dateStart={printDateStart}
+                setDateStart={setPrintDateStart}
+                dateEnd={printDateEnd}
+                setDateEnd={setPrintDateEnd}
+                previewReportId={previewReportId}
+                setPreviewReportId={(id) => { setPreviewReportId(id); setPrintReportIds([]) }}
+                previewReports={printPreviewReports}
+                onReload={loadPrintData}
+                onPrint={requestPrint}
+              />}
+              {tab === 'submit' && <SubmitPanel account={account} templates={availableTemplates} allTemplates={data.templates} fields={data.fields} templateId={templateId} setTemplateId={setTemplateId} periodStart={periodStart} setPeriodStart={setPeriodStart} periodEnd={periodEnd} setPeriodEnd={setPeriodEnd} values={fieldValues} setValues={setFieldValues} editingReportId={editingReportId} reportStatus={data.reports.find((report) => report.id === editingReportId)?.status ?? 'draft'} onSave={saveReport} onNew={clearDraftForm} busy={busy} />}
               {tab === 'finance' && <FinancePanel data={data} categoryName={categoryName} setCategoryName={setCategoryName} categoryType={categoryType} setCategoryType={setCategoryType} onAddCategory={addCategory} transactionCategory={transactionCategory} setTransactionCategory={setTransactionCategory} transactionDate={transactionDate} setTransactionDate={setTransactionDate} transactionDescription={transactionDescription} setTransactionDescription={setTransactionDescription} transactionAmount={transactionAmount} setTransactionAmount={setTransactionAmount} transactionType={transactionType} setTransactionType={setTransactionType} paymentStatus={paymentStatus} setPaymentStatus={setPaymentStatus} onAddTransaction={addTransaction} busy={busy} />}
               {tab === 'staff' && <StaffPanel account={account} data={data} />}
               {tab === 'admin' && <AdminPanel data={data} departmentName={departmentName} setDepartmentName={setDepartmentName} departmentCode={departmentCode} setDepartmentCode={setDepartmentCode} onAddDepartment={addDepartment} onDepartmentActive={setDepartmentActive} busy={busy} />}
@@ -790,6 +1190,10 @@ function Overview({ account, data, pendingReports, unreadNotifications, incomeCo
       <div className="metric-grid">
         {metricCards.map(({ label, value, note, icon: Icon }) => <div className="metric-card" key={label}><div className="metric-icon blue"><Icon /></div><div><span>{label}</span><strong className="metric-value">{value}</strong><small>{note}</small></div></div>)}
       </div>
+      {account.role !== 'worker' && <section className="panel print-access-card">
+        <div><p className="eyebrow">Management tools</p><h2>Reports & Printing</h2><p className="muted">Filter authorized reports across departments, preview a record, or print a complete filtered set.</p></div>
+        <button className="primary-button" type="button" onClick={() => onTab('print')}><Printer /> Open Reports & Printing</button>
+      </section>}
       <section className="panel">
         <div className="panel-heading"><div><h2>Recent reports</h2><p className="muted">Records visible to your signed-in account</p></div><button className="text-button" type="button" onClick={() => onTab('reports')}>Open reports <ArrowUpRight /></button></div>
         {ownReports.length ? <div className="table-wrap"><table><thead><tr><th>Template</th><th>Department</th><th>Reporting period</th><th>Status</th></tr></thead><tbody>
@@ -887,7 +1291,177 @@ function ReportsPanel({ account, data, reports, search, setSearch, selectedRepor
   )
 }
 
-function SubmitPanel({ account, templates, allTemplates, fields, templateId, setTemplateId, periodStart, setPeriodStart, periodEnd, setPeriodEnd, values, setValues, editingReportId, onSave, onNew, busy }: {
+function photographyWeeklyTotals(report: Report, department: Department | undefined, fields: ReportField[], answers: ReportAnswer[]) {
+  if (!department?.name.toLowerCase().includes('photograph')) return []
+  const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+  const totals: { label: string; value: number }[] = []
+  const measures = [
+    { label: 'Derived weekly income total', matches: (name: string) => /\b(income|revenue|sales)\b/.test(name) },
+    { label: 'Derived weekly client count', matches: (name: string) => /\bclients?\b/.test(name) && /\b(count|number|total|clients?)\b/.test(name) },
+  ]
+  for (const measure of measures) {
+    const dailyFields = days.map((day) => fields.filter((field) => {
+      const name = `${field.field_key.replace(/[_-]/g, ' ')} ${field.label}`.toLowerCase()
+      return new RegExp(`\\b${day}\\b`).test(name)
+        && measure.matches(name)
+        && (field.field_type === 'number' || field.field_type === 'currency')
+    }))
+    if (dailyFields.some((matches) => matches.length !== 1)) continue
+    const dailyValues = dailyFields.map(([field]) => {
+      const answer = answers.find((candidate) => candidate.report_id === report.id && candidate.field_id === field.id)
+      if (answer?.value_number === null || answer?.value_number === undefined) return undefined
+      const value = Number(answer.value_number)
+      return Number.isFinite(value) ? value : undefined
+    })
+    if (dailyValues.every((value): value is number => value !== undefined)) {
+      totals.push({ label: measure.label, value: dailyValues.reduce((sum, value) => sum + value, 0) })
+    }
+  }
+  return totals
+}
+
+function PrintReportDocument({ report, data, variant = 'print' }: { report: Report; data: PrintDataset; variant?: 'screen' | 'print' }) {
+  const template = data.templates.find((item) => item.id === report.template_id)
+  const department = data.departments.find((item) => item.id === report.department_id)
+  const employee = data.profiles.find((item) => item.id === report.submitted_by)
+  const fields = data.fields
+    .filter((field) => field.template_id === report.template_id)
+    .sort((left, right) => left.sort_order - right.sort_order)
+  const answers = data.answers.filter((answer) => answer.report_id === report.id)
+  const reviews = data.reviews.filter((review) => review.report_id === report.id)
+  const employeeLabel = employee ? `${employee.first_name} ${employee.last_name}`.trim() || employee.email : 'Authorized employee'
+  const reviewerName = (reviewerId: string) => {
+    const reviewer = data.profiles.find((profile) => profile.id === reviewerId)
+    return reviewer ? `${reviewer.first_name} ${reviewer.last_name}`.trim() || reviewer.email : 'Authorized reviewer'
+  }
+  const weeklyTotals = photographyWeeklyTotals(report, department, fields, answers)
+  const printTimestamp = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date())
+
+  return (
+    <article className={`print-document print-document-${variant}`}>
+      <header className="print-company-header">
+        <Image className="print-company-logo" src="/logo/golden%20star%20logo.png" alt="Golden Star Media House logo" width={240} height={111} />
+        <div><p className="print-company-name">GOLDEN STAR MEDIA HOUSE</p><p>Everything We Touch Turns into Pure Gold</p><p>387 Robert Mugabe Way, Masvingo · +263783469831 / +263783604545</p></div>
+      </header>
+      <div className="print-title-row">
+        <div><p className="eyebrow">Report</p><h2>{template?.name ?? 'Report'}</h2></div>
+        <span className={`status-pill ${statusStyles[report.status]}`}>{statusLabels[report.status] ?? report.status}</span>
+      </div>
+      <dl className="print-metadata">
+        <div><dt>Department</dt><dd>{department?.name ?? '—'}</dd></div>
+        <div><dt>Employee</dt><dd>{employeeLabel}</dd></div>
+        <div><dt>Reporting period</dt><dd>{formatDate(report.report_period_start)} – {formatDate(report.report_period_end)}</dd></div>
+        <div><dt>Submitted</dt><dd>{formatTimestamp(report.submitted_at)}</dd></div>
+        <div><dt>Last reviewed</dt><dd>{formatTimestamp(report.reviewed_at)}</dd></div>
+        <div><dt>Printed</dt><dd>{printTimestamp}</dd></div>
+      </dl>
+      <table className="print-fields-table">
+        <thead><tr><th scope="col">Field</th><th scope="col">Recorded value</th></tr></thead>
+        <tbody>{fields.map((field) => {
+          const answer = answers.find((candidate) => candidate.field_id === field.id)
+          return <tr key={field.id}><th scope="row">{field.label}</th><td>{answerDisplay(answer)}</td></tr>
+        })}{!fields.length && <tr><td colSpan={2}>No report fields are available.</td></tr>}</tbody>
+      </table>
+      {weeklyTotals.length > 0 && <section className="print-weekly-totals">
+        <h3>Photography weekly totals</h3>
+        <dl>{weeklyTotals.map((total) => <div key={total.label}><dt>{total.label}</dt><dd>{amountText(total.value)}</dd></div>)}</dl>
+      </section>}
+      {!weeklyTotals.length && department?.name.toLowerCase().includes('photograph') && <p className="print-total-note">Photography weekly totals were not calculated because the template did not provide all seven unambiguous daily numeric values.</p>}
+      <section className="print-approval-section">
+        <h3>Review and approval history</h3>
+        {reviews.length
+          ? <table className="print-reviews-table"><thead><tr><th>Action</th><th>Reviewer</th><th>Comment</th><th>Date</th></tr></thead><tbody>
+            {reviews.map((review) => <tr key={`${review.report_id}-${review.created_at}`}><td>{statusLabels[review.new_status as ReportStatus] ?? review.new_status}</td><td>{reviewerName(review.reviewer_id)}</td><td>{review.review_comment ?? '—'}</td><td>{formatTimestamp(review.created_at)}</td></tr>)}
+          </tbody></table>
+          : <p>No review actions are recorded.</p>}
+      </section>
+    </article>
+  )
+}
+
+function PrintReportsPanel({ account, data, reports, loading, error, department, setDepartment, template, setTemplate, employee, setEmployee, status, setStatus, dateStart, setDateStart, dateEnd, setDateEnd, previewReportId, setPreviewReportId, previewReports, onReload, onPrint }: {
+  account: Account
+  data: PrintDataset | null
+  reports: Report[]
+  loading: boolean
+  error: string
+  department: string
+  setDepartment: (value: string) => void
+  template: string
+  setTemplate: (value: string) => void
+  employee: string
+  setEmployee: (value: string) => void
+  status: string
+  setStatus: (value: string) => void
+  dateStart: string
+  setDateStart: (value: string) => void
+  dateEnd: string
+  setDateEnd: (value: string) => void
+  previewReportId: string
+  setPreviewReportId: (value: string) => void
+  previewReports: Report[]
+  onReload: () => void
+  onPrint: (reportIds: string[]) => void
+}) {
+  const dateRangeValid = !dateStart || !dateEnd || dateStart <= dateEnd
+  return (
+    <div className="content-stack reports-printing">
+      <section className="panel print-controls">
+        <div className="panel-heading">
+          <div><p className="eyebrow">{account.role} reporting</p><h2>Reports & Printing</h2><p className="muted">Records are loaded from the existing report tables. Supabase RLS determines which reports this account may access.</p></div>
+          <button className="outline-button" type="button" onClick={onReload} disabled={loading}><RefreshCw />{loading ? 'Loading records…' : 'Reload authorized records'}</button>
+        </div>
+        {error && <div className="workspace-alert error" role="alert"><strong>Records could not be loaded</strong><span>{error}</span></div>}
+        {loading && <div className="workspace-loading" role="status">Loading every authorized report and its fields, answers, employees and review history in pages…</div>}
+        {!loading && !error && !data && <p className="muted">Report records are not loaded yet.</p>}
+        {!loading && data && <div className="print-filter-grid">
+          <label>Department<select value={department} onChange={(event) => setDepartment(event.target.value)}><option value="">All departments</option>{data.departments.slice().sort((a, b) => a.name.localeCompare(b.name)).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          <label>Report type<select value={template} onChange={(event) => setTemplate(event.target.value)}><option value="">All report types</option>{data.templates.slice().sort((a, b) => a.name.localeCompare(b.name)).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          <label>Employee<select value={employee} onChange={(event) => setEmployee(event.target.value)}><option value="">All employees</option>{data.profiles.slice().sort((a, b) => `${a.first_name} ${a.last_name}`.localeCompare(`${b.first_name} ${b.last_name}`)).map((item) => <option key={item.id} value={item.id}>{`${item.first_name} ${item.last_name}`.trim() || item.email}</option>)}</select></label>
+          <label>Status<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">All statuses</option>{Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+          <label>Week/date from<input type="date" value={dateStart} onChange={(event) => setDateStart(event.target.value)} /></label>
+          <label>Week/date to<input type="date" value={dateEnd} onChange={(event) => setDateEnd(event.target.value)} /></label>
+        </div>}
+        {!dateRangeValid && <p className="print-filter-error" role="alert">The end date must not be before the start date.</p>}
+      </section>
+
+      {!loading && data && !error && <>
+        <section className="panel table-panel">
+          <div className="table-meta print-results-heading"><div><h2>Matching records</h2><p className="muted">{dateRangeValid ? `${reports.length} authorized record${reports.length === 1 ? '' : 's'} match the current filters.` : 'Correct the date range to see matching reports.'}</p></div>
+            <button className="primary-button" type="button" disabled={!reports.length || !dateRangeValid} onClick={() => onPrint(reports.map((report) => report.id))}><Printer /> Print All Filtered Records ({reports.length})</button>
+          </div>
+          {reports.length ? <div className="table-wrap"><table><thead><tr><th>Report</th><th>Department</th><th>Employee</th><th>Reporting period</th><th>Status</th><th className="print-control-cell">Actions</th></tr></thead><tbody>
+            {reports.map((report) => {
+              const reportTemplate = data.templates.find((item) => item.id === report.template_id)
+              const reportDepartment = data.departments.find((item) => item.id === report.department_id)
+              const reportEmployee = data.profiles.find((item) => item.id === report.submitted_by)
+              return <tr key={report.id}>
+                <td>{reportTemplate?.name ?? 'Report'}</td>
+                <td>{reportDepartment?.name ?? '—'}</td>
+                <td>{reportEmployee ? `${reportEmployee.first_name} ${reportEmployee.last_name}`.trim() || reportEmployee.email : 'Authorized employee'}</td>
+                <td>{formatDate(report.report_period_start)} – {formatDate(report.report_period_end)}</td>
+                <td><span className={`status-pill ${statusStyles[report.status]}`}>{statusLabels[report.status] ?? report.status}</span></td>
+                <td className="print-control-cell"><div className="print-row-actions">
+                  <button type="button" className="outline-button compact-button" onClick={() => setPreviewReportId(report.id)}>Preview</button>
+                  <button type="button" className="primary-button compact-button" onClick={() => onPrint([report.id])}><Printer /> Print Report</button>
+                </div></td>
+              </tr>
+            })}
+          </tbody></table></div> : <EmptyState>{dateRangeValid ? 'No authorized reports match these filters.' : 'Choose a valid date range.'}</EmptyState>}
+        </section>
+        {previewReportId && <section className="panel print-preview-panel">
+          <div className="panel-heading print-controls"><div><p className="eyebrow">Print preview</p><h2>{previewReports[0] ? data.templates.find((item) => item.id === previewReports[0].template_id)?.name ?? 'Report' : 'Report preview'}</h2><p className="muted">Preview values are rendered as text and print using the official company logo.</p></div><div className="button-row"><button className="primary-button" type="button" disabled={!previewReports.length} onClick={() => onPrint([previewReportId])}><Printer /> Print Report</button><button className="outline-button" type="button" onClick={() => setPreviewReportId('')}>Close preview</button></div></div>
+          {previewReports.map((report) => <PrintReportDocument key={report.id} report={report} data={data} variant="screen" />)}
+        </section>}
+      </>}
+      <div className="print-document-list" aria-hidden="true">
+        {data && previewReports.map((report) => <PrintReportDocument key={report.id} report={report} data={data} variant="print" />)}
+      </div>
+    </div>
+  )
+}
+
+function SubmitPanel({ account, templates, allTemplates, fields, templateId, setTemplateId, periodStart, setPeriodStart, periodEnd, setPeriodEnd, values, setValues, editingReportId, reportStatus, onSave, onNew, busy }: {
   account: Account
   templates: Template[]
   allTemplates: Template[]
@@ -901,12 +1475,15 @@ function SubmitPanel({ account, templates, allTemplates, fields, templateId, set
   values: Record<string, string>
   setValues: (value: Record<string, string>) => void
   editingReportId: string
+  reportStatus: ReportStatus
   onSave: (event: FormEvent<HTMLFormElement>, submit: boolean) => void
   onNew: () => void
   busy: boolean
 }) {
   const template = allTemplates.find((item) => item.id === templateId)
   const templateFields = fields.filter((field) => field.template_id === templateId)
+  const ecoCash = isEcoCashTemplate(template, account)
+  const ecoCashMapping = ecoCash ? mapEcoCashFields(templateFields) : undefined
   return (
     <div className="content-stack">
       <div className="schema-notice"><strong>{editingReportId ? 'Editing an existing draft' : 'Drafts are saved before submission'}</strong><p>New reports are inserted with status draft. Answers can be edited under RLS; submitting calls the database submit_report workflow, which validates ownership, department and required answers.</p></div>
@@ -916,17 +1493,150 @@ function SubmitPanel({ account, templates, allTemplates, fields, templateId, set
         onSave(event, submitter instanceof HTMLButtonElement && submitter.value === 'submit')
       }}>
         <div className="form-intro"><div className="metric-icon blue"><FileText /></div><div><h2>{editingReportId ? 'Update report draft' : 'Create a report draft'}</h2><p>{account.firstName} {account.lastName} · {account.role} · {template?.name ?? 'Choose a report template'}</p></div>{editingReportId && <button className="outline-button" type="button" onClick={onNew}>New draft</button>}</div>
-        <div className="form-fields">
-          <label>Report template<select required value={templateId} onChange={(event) => { setTemplateId(event.target.value); setValues({}) }} disabled={Boolean(editingReportId)}><option value="">Choose an active template</option>{templates.map((item) => <option key={item.id} value={item.id}>{item.name} · v{item.version}</option>)}</select></label>
-          <label>Reporting period start<input type="date" required value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} /></label>
-          <label>Reporting period end<input type="date" required min={periodStart || undefined} value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} /></label>
-          {templateFields.map((field) => <ReportFieldInput key={field.id} field={field} value={values[field.id] ?? ''} onChange={(value) => setValues({ ...values, [field.id]: value })} />)}
-          {!templateFields.length && templateId && <p className="muted">This template has no visible fields.</p>}
-        </div>
-        <div className="form-footer"><span>{selectedTemplatesNote(template, templates.length)}</span><div className="button-row"><button className="outline-button" type="submit" value="draft" formNoValidate disabled={busy || !templateId}>Save draft</button><button className="primary-button" type="submit" value="submit" disabled={busy || !templateId}>Save and submit</button></div></div>
+        <label className="workspace-template-field">Report template<select required value={templateId} onChange={(event) => { setTemplateId(event.target.value); setValues({}) }} disabled={Boolean(editingReportId)}><option value="">Choose an active template</option>{templates.map((item) => <option key={item.id} value={item.id}>{item.name} · v{item.version}</option>)}</select></label>
+        {ecoCash ? (
+          <EcoCashReportForm
+            account={account}
+            reportStatus={reportStatus}
+            fields={templateFields}
+            mapping={ecoCashMapping!}
+            periodStart={periodStart}
+            setPeriodStart={setPeriodStart}
+            periodEnd={periodEnd}
+            setPeriodEnd={setPeriodEnd}
+            values={values}
+            setValues={setValues}
+          />
+        ) : (
+          <div className="form-fields">
+            <label>Reporting period start<input type="date" required value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} /></label>
+            <label>Reporting period end<input type="date" required min={periodStart || undefined} value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} /></label>
+            {templateFields.map((field) => <ReportFieldInput key={field.id} field={field} value={values[field.id] ?? ''} onChange={(value) => setValues({ ...values, [field.id]: value })} />)}
+            {!templateFields.length && templateId && <p className="muted">This template has no visible fields.</p>}
+          </div>
+        )}
+        <div className="form-footer"><span>{selectedTemplatesNote(template, templates.length)}</span><div className="button-row"><button className="outline-button" type="submit" value="draft" formNoValidate disabled={busy || !templateId}>Save draft</button><button className="primary-button" type="submit" value="submit" disabled={busy || !templateId || Boolean(ecoCashMapping && !ecoCashMapping.canSubmit)}>Save and submit</button></div></div>
       </form>
     </div>
   )
+}
+
+function EcoCashReportForm({ account, reportStatus, fields, mapping, periodStart, setPeriodStart, periodEnd, setPeriodEnd, values, setValues }: {
+  account: Account
+  reportStatus: ReportStatus
+  fields: ReportField[]
+  mapping: ReturnType<typeof mapEcoCashFields>
+  periodStart: string
+  setPeriodStart: (value: string) => void
+  periodEnd: string
+  setPeriodEnd: (value: string) => void
+  values: Record<string, string>
+  setValues: (value: Record<string, string>) => void
+}) {
+  const summaryFields = fields.filter((field) => !mapping.dailyFieldIds.has(field.id))
+  const setFieldValue = (field: ReportField, value: string) => setValues({ ...values, [field.id]: value })
+
+  return (
+    <div className="ecocash-report">
+      <header className="ecocash-company-header">
+        <p className="eyebrow">GOLDEN STAR MEDIA HOUSE</p>
+        <p>Everything We Touch Turns into Pure Gold</p>
+        <p>387 Robert Mugabe Way, Masvingo</p>
+        <p>+263783469831 / +263783604545</p>
+        <h2>ECOCASH FLOAT REGISTER</h2>
+      </header>
+
+      <section className="ecocash-period" aria-labelledby="ecocash-period-title">
+        <h3 id="ecocash-period-title">Reporting period</h3>
+        <label>Week commencing<input type="date" required value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} /></label>
+        <label>Week ending<input type="date" required value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} /></label>
+        <div><span>Assigned Finance employee</span><strong>{`${account.firstName} ${account.lastName}`.trim() || account.email}</strong></div>
+        <div><span>Report status</span><strong><span className={`status-pill ${statusStyles[reportStatus]}`}>{statusLabels[reportStatus]}</span></strong></div>
+      </section>
+
+      <section className="ecocash-register" aria-labelledby="ecocash-register-title">
+        <div className="ecocash-section-heading">
+          <div><h3 id="ecocash-register-title">Daily register</h3><p>Fields and answer IDs are loaded from this template in Supabase.</p></div>
+        </div>
+        <div className="ecocash-table-scroll" role="region" aria-label="Seven-day EcoCash float register" tabIndex={0}>
+          <table className="ecocash-table">
+            <thead><tr>{ecoCashColumns.map((column) => <th scope="col" key={column.id}>{column.label}</th>)}</tr></thead>
+            <tbody>
+              {ecoCashDays.map((day, dayIndex) => {
+                const dayFields = mapping.mapped.get(day.id)
+                const dateField = dayFields?.date
+                return (
+                  <tr key={day.id}>
+                    {ecoCashColumns.map((column) => {
+                      if (column.id === 'date') {
+                        return <td className="ecocash-date-cell" key={column.id}>
+                          <strong>{day.label}</strong>
+                          {dateField
+                            ? <EcoCashFieldInput field={dateField} value={values[dateField.id] ?? ''} onChange={(value) => setFieldValue(dateField, value)} accessibleLabel={`${day.label} date`} />
+                            : <span>{formatDate(dateForWeekDay(periodStart, dayIndex))}</span>}
+                        </td>
+                      }
+                      const field = dayFields?.[column.id]
+                      return (
+                        <td key={column.id}>
+                          {field
+                            ? <EcoCashFieldInput field={field} value={values[field.id] ?? ''} onChange={(value) => setFieldValue(field, value)} accessibleLabel={`${day.label} ${column.label}`} />
+                            : <span className="ecocash-unmapped" aria-label={`${day.label} ${column.label} field not found in template`}>Not configured</span>}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+        {(!mapping.canSubmit) && <div className="ecocash-template-warning" role="status">
+          <strong>Template field mapping needs review</strong>
+          <p>The visible template fields do not unambiguously cover each daily register column. Drafts remain available, but submission is disabled until the template labels are verified.</p>
+          {mapping.duplicateCells.length > 0 && <p>Duplicate matches: {mapping.duplicateCells.join(', ')}.</p>}
+          {mapping.missingCells.length > 0 && <p>Missing template fields: {mapping.missingCells.slice(0, 8).join(', ')}{mapping.missingCells.length > 8 ? ', and others' : ''}.</p>}
+          {mapping.unmappedDailyFields.length > 0 && <p>Unrecognized weekday fields: {mapping.unmappedDailyFields.map((field) => field.label).join(', ')}.</p>}
+        </div>}
+      </section>
+
+      <section className="ecocash-summary" aria-labelledby="ecocash-summary-title">
+        <h3 id="ecocash-summary-title">Weekly summary</h3>
+        <div className="form-fields">
+          {summaryFields.map((field) => <ReportFieldInput key={field.id} field={field} value={values[field.id] ?? ''} onChange={(value) => setFieldValue(field, value)} />)}
+          {!summaryFields.length && <p className="muted">No weekly summary fields are defined in this template.</p>}
+        </div>
+      </section>
+
+      <aside className="ecocash-accounting-warning" role="note">
+        <strong>Reconciliation and sign-off</strong>
+        <p>No float-balance formula or total is calculated. Enter the values supplied by the register and reconcile them using your approved Finance procedure.</p>
+        <p>Names entered in signature fields are typed acknowledgements only and are not verified digital signatures.</p>
+      </aside>
+    </div>
+  )
+}
+
+function EcoCashFieldInput({ field, value, onChange, accessibleLabel }: {
+  field: ReportField
+  value: string
+  onChange: (value: string) => void
+  accessibleLabel: string
+}) {
+  if (field.field_type === 'checkbox') {
+    return <input aria-label={accessibleLabel} type="checkbox" required={field.is_required} checked={value === 'true'} onChange={(event) => onChange(String(event.target.checked))} />
+  }
+  if (field.field_type === 'select') {
+    const options = readSelectOptions(field.options)
+    if (options.length) {
+      return <select aria-label={accessibleLabel} required={field.is_required} value={value} onChange={(event) => onChange(event.target.value)}><option value="">Choose</option>{options.map((option) => <option key={option} value={option}>{option}</option>)}</select>
+    }
+  }
+  if (field.field_type === 'textarea') {
+    return <textarea aria-label={accessibleLabel} required={field.is_required} rows={2} value={value} onChange={(event) => onChange(event.target.value)} />
+  }
+  const inputType = field.field_type === 'currency' || field.field_type === 'number' ? 'number' : field.field_type === 'date' ? 'date' : 'text'
+  return <input aria-label={accessibleLabel} type={inputType} step={inputType === 'number' ? 'any' : undefined} required={field.is_required} value={value} onChange={(event) => onChange(event.target.value)} />
 }
 
 function selectedTemplatesNote(template: Template | undefined, count: number) {

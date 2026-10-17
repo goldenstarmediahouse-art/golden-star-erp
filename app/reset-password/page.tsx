@@ -1,3 +1,4 @@
+import Image from 'next/image'
 import { redirect } from 'next/navigation'
 import ResetPasswordForm from '@/components/reset-password-form'
 import { getSupabaseConfigError } from '@/lib/supabase/env'
@@ -18,7 +19,7 @@ export default async function ResetPasswordPage() {
 
   return (
     <main className="auth-shell">
-      <section className="auth-brand-panel"><div className="auth-brand-mark">GS</div><p className="auth-kicker">ACCOUNT SECURITY</p><h1>Golden Star<br />Media House</h1><p>ERP System</p></section>
+      <section className="auth-brand-panel"><Image className="auth-brand-mark" src="/logo/golden%20star%20logo.png" alt="Golden Star Media House" width={720} height={333} priority /><p className="auth-kicker">ACCOUNT SECURITY</p><p>ERP System</p></section>
       <section className="auth-form-panel">
         <div className="auth-form-wrap">
           <p className="eyebrow">Password recovery</p><h2>Choose a new password</h2>
