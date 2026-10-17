@@ -14,3 +14,18 @@ __v0_jsx-dev-runtime.ts
 node_modules
 .next/
 .DS_Store
+# Local environment secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies and build output
+node_modules/
+.next/
+out/
+
+# Local Supabase CLI state
+supabase/.temp/
+
+# TypeScript build cache
+*.tsbuildinfo
